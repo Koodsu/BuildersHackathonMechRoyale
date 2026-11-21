@@ -7,7 +7,13 @@ import { readFileSync } from "node:fs"
 import { gunzipSync } from "node:zlib"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
-import { Brain } from "../src/bot.ts"
+import { Brain, TUNING } from "../src/bot.ts"
+
+// switches, to check that the comparison builds do not crash either
+if (process.env.BRAWL) TUNING.brawl = true
+if (process.env.STANDOFF === "0") TUNING.standoff = false
+if (process.env.WARY) TUNING.wary = Number(process.env.WARY)
+if (process.env.SEEK === "0") TUNING.seek = false
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..")
 const msgs = gunzipSync(readFileSync(join(root, "kit/check/stream.jsonl.gz"))).toString("utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l))
@@ -63,8 +69,12 @@ const q = (a: number[], f: number) => a[Math.min(a.length - 1, Math.floor(f * a.
   let errors = 0
   let ticks = 0
   const labels = new Map<string, number>()
-  for (let run = 0; run < 12; run++) {
+  // Half the bots are held in practice mode (no deaths but ours, mode flag reset every tick), so that
+  // the long-range fighting, seeking and finishing code gets the same battering as the free-for-all code.
+  const RUNS = Number(process.env.RUNS ?? 12)
+  for (let run = 0; run < RUNS; run++) {
     const b = new Brain({ ...hello, seed: run, slot: run % 16 })
+    const practice = run % 2 === 1
     let [x, y] = pick(spots)
     x += (rnd() - 0.5) * 80
     y += (rnd() - 0.5) * 80
@@ -111,17 +121,25 @@ const q = (a: number[], f: number) => a[Math.min(a.length - 1, Math.floor(f * a.
       if (rnd() < 0.02) events.push({ type: "took", id: 8000 + Math.floor(rnd() * 20), kind: "laser", slot: 1 })
       if (rnd() < 0.02) events.push({ type: "dropped", id: 8000 + Math.floor(rnd() * 20), kind: "laser", slot: 1 })
       const o: any = {
-        type: "obs", tick: Math.round(t * 20), t, alive: 10,
+        type: "obs", tick: Math.round(t * 20), t, alive: practice ? 16 : 10,
         self: { id: 3, pos: [x, y, z], vel: [(rnd() - 0.5) * 20, (rnd() - 0.5) * 20, grounded ? 0 : (rnd() - 0.5) * 30], aim: [rnd() * 6 - 3, rnd() - 0.5], hp: 50 + rnd() * 1900, max_hp: 1960, energy: rnd() * 100, max_energy: 100, grounded, cubes, upgrades: [], in_zone: rnd() < 0.85, weapons, stats: { ...cfg.mech, radius: 2.5 * sc, height: 9 * sc, eye_height: 8 * sc, muzzle_height: 7 * sc } },
         mechs,
         projectiles: Array.from({ length: Math.floor(rnd() * 3) }, (_, i) => ({ id: 200 + i, kind: pick(["gun", "mortar", "npc"]), pos: [x + (rnd() - 0.5) * 100, y + (rnd() - 0.5) * 100, z + rnd() * 40], vel: [(rnd() - 0.5) * 100, (rnd() - 0.5) * 100, (rnd() - 0.5) * 60] })),
         crates: near(4, 1000, () => ({ hp: 300 })),
         cubes: near(4, 5000, () => ({})),
         pickups: near(5, 8000, () => ({ kind: pick(kinds.slice(1)) })),
-        sounds: [], beams: [], events,
+        sounds: rnd() < 0.15 ? [{ kind: pick(["gun", "boost", "step", "jet", "laser_charge", "laser", "lightning", "crate"]), bearing: rnd() * 6.28 - 3.14, dist: pick(["near", "mid", "far"]), age: 0.05 }] : [], beams: [], events,
         drops: rnd() < 0.3 ? [{ id: 20000, pos: [x + 40, y, z], radius: 8, lands_in: rnd() * 20, capture_s: 4, progress: 0, holder: null }] : [],
         zone: { center: [41.3 + phase * 5, -72.8], radius: radii[phase] + rnd() * 5, next_center: [41.3 + phase * 5 + (rnd() - 0.5) * 60, -72.8 + (rnd() - 0.5) * 60], next_radius: radii[phase + 1], shrink_start: t + 30 - k * 0.1, shrink_end: t + 60 - k * 0.1, dps: 20 },
         offer: rnd() < 0.1 ? { id: 1, expires: t + 5, choices: [0, 1, 2].map(() => pick(cfg.upgrades as any[])) } : null,
+      }
+      if (practice) {
+        // a wide circle around wherever we are, so that the fighting code runs instead of the zone code
+        o.zone = { center: [x, y], radius: 560, next_center: [x + 20, y - 10], next_radius: 380, shrink_start: t + 200, shrink_end: t + 250, dps: 20 }
+        o.self.in_zone = true
+        ;(b as any).ffa = false
+        ;(b as any).foreignHits = 0
+        ;(b as any).killCount = Math.floor(run / 2) % 6
       }
       const ts = performance.now()
       const c0 = process.cpuUsage()
@@ -139,7 +157,7 @@ const q = (a: number[], f: number) => a[Math.min(a.length - 1, Math.floor(f * a.
   }
   times.sort((x, y) => x - y)
   cpu.sort((x, y) => x - y)
-  console.log(`randomised: ${ticks} ticks over 12 bots, errors ${errors}, ms p50 ${q(times, 0.5).toFixed(2)} p99 ${q(times, 0.99).toFixed(2)} p99.9 ${q(times, 0.999).toFixed(2)} max ${q(times, 1).toFixed(2)}`)
+  console.log(`randomised: ${ticks} ticks over ${RUNS} bots, errors ${errors}, ms p50 ${q(times, 0.5).toFixed(2)} p99 ${q(times, 0.99).toFixed(2)} p99.9 ${q(times, 0.999).toFixed(2)} max ${q(times, 1).toFixed(2)}`)
   console.log(`  CPU time of the whole process per tick (includes the runtime's own threads; unaffected by other programs): ms p99 ${q(cpu, 0.99).toFixed(2)} p99.9 ${q(cpu, 0.999).toFixed(2)} max ${q(cpu, 1).toFixed(2)}`)
   console.log(`  legs: ${[...labels].sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${v}`).join(", ")}`)
   if (errors) process.exit(1)

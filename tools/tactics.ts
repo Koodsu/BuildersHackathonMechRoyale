@@ -41,6 +41,11 @@ function setup(dist: number): number[] | null {
 }
 
 interface Case {
+  t0?: number // match time the scenario starts at (default 30 s, after the cautious opening)
+  away?: boolean // the other mech is not facing us
+  walking?: boolean // the other mech is walking at us
+  theirHp?: number // the other mech's health as a fraction (default full)
+  fleeing?: boolean // the other mech is walking away from us
   name: string
   dist: number
   mine: string | null
@@ -77,7 +82,7 @@ function run(c: Case, trials: number) {
     let pitch = 0
     let shot = false
     for (let k = 0; k < 40; k++) {
-      const t = 30 + k * 0.1
+      const t = (c.t0 ?? 30) + k * 0.1
       const z = W.ground(x, y)
       const weapons: any[] = [{ kind: "gun", cooldown: 0, ammo: 12, reload: 0, stats: C.weapons.gun }]
       weapons.push(c.mine ? { kind: c.mine, cooldown: 0, charge: 0, stats: C.weapons[c.mine] } : null)
@@ -87,10 +92,11 @@ function run(c: Case, trials: number) {
         drops: c.drop ? [{ id: 20000, pos: [x + 30, y, W.ground(x + 30, y)], radius: 8, lands_in: 0, capture_s: 4, progress: 0, holder: null }] : [],
         self: { ...base.self, pos: [x, y, z], vel: [vx, vy, 0], aim: [yaw, pitch], grounded: true, hp: 1400 * c.hp, max_hp: 1400, energy: 100, max_energy: 100, cubes: 0, in_zone: true, weapons, stats: { ...M } },
         // listed every tick, as the 5 s memory would: the bot must work out the line of sight itself
-        mechs: c.sniper ? [] : [{ id: 9, kind: "mech", pos: [ex, ey, W.ground(ex, ey)], vel: [0, 0, 0], aim: [Math.atan2(y - ey, x - ex), 0], hp: 1400, max_hp: 1400, cubes: 0, weapons: c.theirs, charging: c.charging }],
+        mechs: c.sniper ? [] : [{ id: 9, kind: "mech", pos: [ex, ey, W.ground(ex, ey)], vel: c.walking ? [((x - ex) / Math.hypot(x - ex, y - ey)) * 8, ((y - ey) / Math.hypot(x - ex, y - ey)) * 8, 0] : c.fleeing ? [((ex - x) / Math.hypot(x - ex, y - ey)) * 6, ((ey - y) / Math.hypot(x - ex, y - ey)) * 6, 0] : [0, 0, 0], aim: [Math.atan2(y - ey, x - ex) + (c.away ? 2 : 0), 0], hp: 1400 * (c.theirHp ?? 1), max_hp: 1400, cubes: 0, weapons: c.theirs, charging: c.charging }],
         zone: { center: [41, -73], radius: 560, next_center: [41, -73], next_radius: 380, shrink_start: 600, shrink_end: 650, dps: 20 },
       }
       const a = b.act(obs)
+      if (process.env.TRACE && c.name.includes(process.env.TRACE) && n === 0 && k % 5 === 0) console.log(`      k=${k} pos ${x.toFixed(0)},${y.toFixed(0)} d ${Math.hypot(ex - x, ey - y).toFixed(0)} label ${b.label} move ${a.move} boost ${a.boost} fire ${a.fire} finishing ${b.finishing} rangeNow ${b.rangeNow} kiteGain ${b.kiteGain?.toFixed?.(1)}`)
       labels.set(b.label, (labels.get(b.label) ?? 0) + 1)
       if (a.fire[0] || a.fire[1]) shot = true
       yaw = a.aim[0]
@@ -131,6 +137,7 @@ const cases: Case[] = [
   { name: "gun+lightning vs gun+laser at 120 m (expect: fight, range held or opening)", dist: 120, mine: "lightning", theirs: ["gun", "laser"], hp: 1, charging: false },
   { name: "60% health, enemy with gun at 120 m (expect: fight on: half health is the line)", dist: 120, mine: "laser", theirs: ["gun"], hp: 0.6, charging: false },
   { name: "45% health, enemy with gun at 120 m (expect: heal or away, out of sight or range opening)", dist: 120, mine: null, theirs: ["gun"], hp: 0.45, charging: false },
+  { name: "gun+laser vs a gun at 150 m that is down to 25% health (expect: fight, closing in to finish)", dist: 150, mine: "laser", theirs: ["gun"], hp: 1, charging: false, theirHp: 0.25, fleeing: true },
   { name: "half health, enemy at 35 m (expect: fight, they are on us)", dist: 35, mine: null, theirs: ["gun"], hp: 0.5, charging: false },
   { name: "gun+laser vs gun+laser at 90 m, theirs charging on us (expect: laser duck where cover is within a step)", dist: 90, mine: "laser", theirs: ["gun", "laser"], hp: 1, charging: true },
   { name: "gun+laser vs gun+laser at 150 m, theirs charging on us (expect: fight, no duck)", dist: 150, mine: "laser", theirs: ["gun", "laser"], hp: 1, charging: true },
@@ -140,6 +147,11 @@ const TRIALS = Number(process.env.TRIALS ?? 40)
 for (const c of cases) run(c, TRIALS)
 console.log("--- an attacker beyond our sight")
 run({ name: "laser hits from 200 m, shooter never visible (expect: unseen, out of its line)", dist: 200, mine: null, theirs: ["gun", "laser"], hp: 0.8, charging: false, sniper: 200 }, TRIALS)
+console.log("--- the opening, before the kind of match is known (5 s in)")
+run({ name: "mech at 150 m, not facing us, standing (expect: carry on looting, no trigger pulled)", dist: 150, mine: null, theirs: ["gun"], hp: 1, charging: false, t0: 5, away: true }, TRIALS)
+run({ name: "mech at 90 m, not facing us (expect: evade, no trigger pulled)", dist: 90, mine: null, theirs: ["gun"], hp: 1, charging: false, t0: 5, away: true }, TRIALS)
+run({ name: "mech at 150 m walking at us, guns on us (expect: fight from range)", dist: 150, mine: null, theirs: ["gun"], hp: 1, charging: false, t0: 5, walking: true }, TRIALS)
+run({ name: "shot at from 120 m (expect: fight from range)", dist: 120, mine: null, theirs: ["gun"], hp: 1, charging: false, t0: 5, attacking: true }, TRIALS)
 console.log("--- free-for-all mode")
 run({ name: "passer-by with a gun at 150 m, not shooting (expect: evade, no trigger pulled)", dist: 150, mine: "laser", theirs: ["gun"], hp: 1, charging: false, ffa: true }, TRIALS)
 run({ name: "shot at from 150 m (expect: evade, shooting back while leaving)", dist: 150, mine: "laser", theirs: ["gun"], hp: 1, charging: false, ffa: true, attacking: true }, TRIALS)

@@ -70,9 +70,19 @@ function tour(seed: number) {
       return
     }
     from = { x: zc[0], y: zc[1], r: zr }
-    const a = rnd() * 6.283
-    const d = Math.sqrt(rnd()) * Math.max(0, zr - p.radius)
-    next = { x: zc[0] + Math.cos(a) * d, y: zc[1] + Math.sin(a) * d, r: p.radius }
+    // Centres stay on the map, well inside it: on the public match feed every circle of 380 m or
+    // less was centred at least 150 m from the map's edge. (Without this the test sometimes closed
+    // the last circles on a point off the map, which no bot can stand on.)
+    let nx = zc[0]
+    let ny = zc[1]
+    for (let tries = 0; tries < 200; tries++) {
+      const a = rnd() * 6.283
+      const d = Math.sqrt(rnd()) * Math.max(0, zr - p.radius)
+      nx = zc[0] + Math.cos(a) * d
+      ny = zc[1] + Math.sin(a) * d
+      if (nx > w.bMinX + 120 && nx < w.bMaxX - 120 && ny > w.bMinY + 120 && ny < w.bMaxY - 120) break
+    }
+    next = { x: nx, y: ny, r: p.radius }
     zs = t + p.hold_s
     ze = zs + p.shrink_s
     dps = p.dps
@@ -150,6 +160,8 @@ function tour(seed: number) {
   let secondT = -1
   let swaps = 0
   let laserT = -1
+  let laserSeenT = -1
+  let laserSeenD = 0
   let secondRoof = false
   let cubes = 0
   let ammo = C.weapons.gun.mag
@@ -193,7 +205,13 @@ function tour(seed: number) {
       drops: drops.map((d) => ({ id: d.id, pos: [d.x, d.y, d.z], radius: C.drops.radius, lands_in: Math.max(0, d.landT - t), capture_s: C.drops.capture_s, progress: d.progress, holder: d.progress > 0 ? 3 : null })),
       crates: crates.filter((c) => sees(c.x, c.y, c.z)).map((c) => ({ id: c.id, pos: [c.x, c.y, c.z], hp: c.hp })),
       cubes: cubesOnGround.filter((c) => sees(c.x, c.y, c.z)).map((c) => ({ id: c.id, pos: [c.x, c.y, c.z] })),
-      pickups: pickups.filter((c) => sees(c.x, c.y, c.z)).map((c) => ({ id: c.id, kind: c.kind, pos: [c.x, c.y, c.z] })),
+      pickups: pickups.filter((c) => sees(c.x, c.y, c.z)).map((c) => {
+        if (c.kind === "laser" && laserSeenT < 0) {
+          laserSeenT = t
+          laserSeenD = Math.hypot(c.x - x, c.y - y)
+        }
+        return { id: c.id, kind: c.kind, pos: [c.x, c.y, c.z] }
+      }),
       events,
       self: { ...base.self, pos: [x, y, z], vel: [vx, vy, vz], aim: [yaw, pitch], grounded, energy, max_energy: M.energy, hp, max_hp: maxHp, cubes, in_zone: inZone, weapons, stats: { ...M, radius: M.radius * (1 + 0.05 * cubes), height: M.height * (1 + 0.05 * cubes) } },
       zone: { center: [zc[0], zc[1]], radius: zr, next_center: [next.x, next.y], next_radius: next.r, shrink_start: zs, shrink_end: ze, dps },
@@ -441,7 +459,7 @@ function tour(seed: number) {
       }
     }
   }
-  return { lost, outSec, lostBy, errors: b.errors as number, labels, endDist: Math.hypot(x - zc[0], y - zc[1]), zr, second, secondT, secondRoof, swaps, laserT, cubes, cubesAt, cratesDone, roofSec, captured, minHp, droneDmg, dronesKilled, hurtSec }
+  return { lost, outSec, lostBy, errors: b.errors as number, labels, endDist: Math.hypot(x - zc[0], y - zc[1]), zr, second, secondT, secondRoof, swaps, laserT, laserSeenT, laserSeenD, cubes, cubesAt, cratesDone, roofSec, captured, minHp, droneDmg, dronesKilled, hurtSec }
 }
 
 const N = Number(process.argv[2] ?? 12)
@@ -458,6 +476,9 @@ let roofTaken = 0
 const kindsGot = new Map<string, number>()
 let swapRuns = 0
 const laserTs: number[] = []
+const laserSeen: number[] = []
+const laserSeenDs: number[] = []
+const laserLag: number[] = []
 const cubeSum = [0, 0, 0, 0, 0, 0, 0]
 let crateSum = 0
 let dropSum = 0
@@ -484,6 +505,11 @@ for (let i = 0; i < N; i++) {
     if (r.secondRoof) roofTaken++
     if (r.swaps) swapRuns++
     if (r.laserT >= 0) laserTs.push(r.laserT)
+    if (r.laserSeenT >= 0) {
+      laserSeen.push(r.laserSeenT)
+      laserSeenDs.push(r.laserSeenD)
+      if (r.laserT >= 0) laserLag.push(r.laserT - r.laserSeenT)
+    }
   } else none++
   r.cubesAt.forEach((v: number, k: number) => (cubeSum[k] += v))
   crateSum += r.cratesDone
@@ -498,6 +524,9 @@ for (let i = 0; i < N; i++) {
 }
 got.sort((p, q) => p - q)
 const pc = (f: number) => (got.length ? got[Math.min(got.length - 1, Math.floor(f * got.length))].toFixed(0) : "-")
+const med = (v: number[]) => (v.length ? [...v].sort((a, b) => a - b)[v.length >> 1].toFixed(0) : "-")
+if (process.env.LASERS) console.log("  per run: seen at / distance / in hand at: " + laserSeen.map((v, i) => `${v.toFixed(0)}s/${laserSeenDs[i].toFixed(0)}m/${laserTs[i]?.toFixed(0)}s`).join("  "))
+console.log(`first laser in sight after ${med(laserSeen)} s (median), ${med(laserSeenDs)} m away; in hand ${med(laserLag)} s after that`)
 console.log(`second weapon: held in ${got.length}/${ran} runs (never in ${none}); picked up after ${pc(0.25)} s / ${pc(0.5)} s / ${pc(0.9)} s (quartile / median / 90th percentile); ${roofTaken} came from a roof; kinds held at the end ${[...kindsGot].map(([k, v]) => `${k} ${v}`).join(", ")}; swapped for a laser in ${swapRuns} runs; laser in hand after ${laserTs.length ? [...laserTs].sort((a, b) => a - b).filter((_, i, v) => i === (v.length >> 1) || i === Math.floor(v.length * 0.9)).map((v) => v.toFixed(0) + " s").join(" / ") : "-"} (median / 90th percentile, ${laserTs.length} runs)`)
 console.log(`cubes held at 60/120/180/240 s: ${[1, 2, 3, 4].map((k) => (cubeSum[k] / ran).toFixed(1)).join(" / ")}; crates destroyed per run ${(crateSum / ran).toFixed(1)}; seconds spent on roofs per run ${(roofSecSum / ran).toFixed(0)}${process.env.DROPS ? `; supply drops captured per run ${(dropSum / ran).toFixed(2)} of 3` : ""}`)
 console.log(`drones: killed ${(droneKillSum / ran).toFixed(1)} of 12 per run, their fire cost ${(droneDmgSum / ran).toFixed(0)} HP per run; time below three-quarter health ${(hurtSum / ran).toFixed(0)} s per run; lowest health seen ${lowest.toFixed(0)}`)

@@ -61,9 +61,19 @@ function tour(seed: number) {
       return
     }
     from = { x: zc[0], y: zc[1], r: zr }
-    const a = rnd() * 6.283
-    const d = Math.sqrt(rnd()) * Math.max(0, zr - p.radius)
-    next = { x: zc[0] + Math.cos(a) * d, y: zc[1] + Math.sin(a) * d, r: p.radius }
+    // Centres stay on the map, well inside it: on the public match feed every circle of 380 m or
+    // less was centred at least 150 m from the map's edge. (Without this the test sometimes closed
+    // the last circles on a point off the map, which no bot can stand on.)
+    let nx = zc[0]
+    let ny = zc[1]
+    for (let tries = 0; tries < 200; tries++) {
+      const a = rnd() * 6.283
+      const d = Math.sqrt(rnd()) * Math.max(0, zr - p.radius)
+      nx = zc[0] + Math.cos(a) * d
+      ny = zc[1] + Math.sin(a) * d
+      if (nx > w.bMinX + 120 && nx < w.bMaxX - 120 && ny > w.bMinY + 120 && ny < w.bMaxY - 120) break
+    }
+    next = { x: nx, y: ny, r: p.radius }
     zs = t + p.hold_s
     ze = zs + p.shrink_s
     dps = p.dps
