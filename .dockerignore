@@ -1,0 +1,6 @@
+.git
+kit
+tools
+*.tar.gz
+*.md
+.DS_Store
