@@ -21,6 +21,7 @@ Bot for the Builders Buildathon "Mech Royale" track (protocol `mechfight/1`). Ty
 node tools/maptest.ts            # map model against the kit's recorded match
 node tools/walk.ts               # legs reach their goal across the map (ground, roofs, stadium)
 node tools/aimtest.ts            # shots land on a moving target
+node tools/tactics.ts            # stances: fight, wait behind cover, heal first, duck a charging laser
 node tools/replay.ts             # no crashes, invalid actions or slow ticks on recorded and random input
 python3 kit/check/check.py -- node main.ts
 ```

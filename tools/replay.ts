@@ -59,6 +59,7 @@ const q = (a: number[], f: number) => a[Math.min(a.length - 1, Math.floor(f * a.
   const cfg = hello.config
   const spots: number[][] = [[320, -280], [-276, 128], [-250, 60], [0, 0], [41, -73], [-400, 300], [500, -300], [100, 200], [-100, -30], [250, -260]]
   const times: number[] = []
+  const cpu: number[] = []
   let errors = 0
   let ticks = 0
   const labels = new Map<string, number>()
@@ -123,8 +124,11 @@ const q = (a: number[], f: number) => a[Math.min(a.length - 1, Math.floor(f * a.
         offer: rnd() < 0.1 ? { id: 1, expires: t + 5, choices: [0, 1, 2].map(() => pick(cfg.upgrades as any[])) } : null,
       }
       const ts = performance.now()
+      const c0 = process.cpuUsage()
       const a = b.act(o)
       times.push(performance.now() - ts)
+      const c1 = process.cpuUsage(c0)
+      cpu.push((c1.user + c1.system) / 1000)
       const why = bad(a)
       if (why) throw new Error(`invalid ${why}: ${JSON.stringify(a)}`)
       labels.set(b.label, (labels.get(b.label) ?? 0) + 1)
@@ -134,7 +138,9 @@ const q = (a: number[], f: number) => a[Math.min(a.length - 1, Math.floor(f * a.
     errors += b.errors
   }
   times.sort((x, y) => x - y)
+  cpu.sort((x, y) => x - y)
   console.log(`randomised: ${ticks} ticks over 12 bots, errors ${errors}, ms p50 ${q(times, 0.5).toFixed(2)} p99 ${q(times, 0.99).toFixed(2)} p99.9 ${q(times, 0.999).toFixed(2)} max ${q(times, 1).toFixed(2)}`)
+  console.log(`  CPU time of the whole process per tick (includes the runtime's own threads; unaffected by other programs): ms p99 ${q(cpu, 0.99).toFixed(2)} p99.9 ${q(cpu, 0.999).toFixed(2)} max ${q(cpu, 1).toFixed(2)}`)
   console.log(`  legs: ${[...labels].sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${v}`).join(", ")}`)
   if (errors) process.exit(1)
 }

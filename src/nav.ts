@@ -269,7 +269,7 @@ export class Nav {
    * (both snapped onto the main component). When the search budget runs out, the path leads to the
    * explored cell closest to the goal. Null when either end is nowhere near walkable ground.
    */
-  findPath(sx: number, sy: number, tx: number, ty: number, maxExp = 25000): number[] | null {
+  findPath(sx: number, sy: number, tx: number, ty: number, maxExp = 18000): number[] | null {
     const s = this.snap(sx, sy, 15)
     const goal = this.snap(tx, ty, 160)
     this.expanded = 0
