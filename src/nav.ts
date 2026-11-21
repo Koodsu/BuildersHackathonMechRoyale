@@ -269,24 +269,28 @@ export class Nav {
    * (both snapped onto the main component). When the search budget runs out, the path leads to the
    * explored cell closest to the goal. Null when either end is nowhere near walkable ground.
    */
-  findPath(sx: number, sy: number, tx: number, ty: number, maxExp = 18000): number[] | null {
+  findPath(sx: number, sy: number, tx: number, ty: number, maxExp = 18000, zone?: { x: number; y: number; r: number; pen: number }, goalR = 0): number[] | null {
     const s = this.snap(sx, sy, 15)
-    const goal = this.snap(tx, ty, 160)
+    // with a goal radius, any walkable cell within that distance of the target ends the search
+    const goal = goalR > 0 ? -2 : this.snap(tx, ty, 160)
     this.expanded = 0
-    if (s < 0 || goal < 0) return null
+    if (s < 0 || goal === -1) return null
     if (s === goal) return [this.cx(s), this.cy(s)]
     const { gw, g, parent, seen, closed, edges } = this
-    const { nx, dist } = this.w
+    const { nx, dist, minX, minY } = this.w
     const stamp = ++this.stamp
     const gI = goal % gw
     const gJ = (goal - gI) / gw
     const W = 1.3
     const nearWall = this.radius + 2.5
-    const h = (c: number) => {
-      const a = Math.abs((c % gw) - gI)
-      const b = Math.abs(Math.floor(c / gw) - gJ)
-      return (a > b ? a + 0.4142 * b : b + 0.4142 * a) * CS
-    }
+    const h =
+      goalR > 0
+        ? (c: number) => Math.max(0, Math.hypot(minX + (c % gw) * CS - tx, minY + Math.floor(c / gw) * CS - ty) - goalR)
+        : (c: number) => {
+            const a = Math.abs((c % gw) - gI)
+            const b = Math.abs(Math.floor(c / gw) - gJ)
+            return (a > b ? a + 0.4142 * b : b + 0.4142 * a) * CS
+          }
     this.hn = 0
     g[s] = 0
     parent[s] = -1
@@ -299,12 +303,13 @@ export class Nav {
       const c = this.pop()
       if (closed[c] === stamp) continue
       closed[c] = stamp
-      if (c === goal) {
+      const hc = h(c)
+      if (c === goal || (goalR > 0 && hc <= 0)) {
         found = true
+        bestC = c
         break
       }
       if (++this.expanded > maxExp) break
-      const hc = h(c)
       if (hc < bestH) {
         bestH = hc
         bestC = c
@@ -319,7 +324,9 @@ export class Nav {
         const nJ = J + DJ[d]
         const nc = nJ * gw + nI
         if (closed[nc] === stamp) continue
-        const pen = dist[nJ * CS * nx + nI * CS] < nearWall ? 1.3 : 1
+        let pen = dist[nJ * CS * nx + nI * CS] < nearWall ? 1.3 : 1
+        // ground outside the zone costs extra: prefer a longer way that stays inside it
+        if (zone && Math.hypot(minX + nI * CS - zone.x, minY + nJ * CS - zone.y) > zone.r) pen *= zone.pen
         const ng = gc + DC[d] * CS * pen
         if (seen[nc] !== stamp || ng < g[nc]) {
           seen[nc] = stamp
@@ -330,7 +337,7 @@ export class Nav {
       }
     }
     const out: number[] = []
-    let c = found ? goal : bestC
+    let c = bestC
     let guard = 0
     while (c >= 0 && guard++ < 100000) {
       out.push(this.cy(c), this.cx(c))

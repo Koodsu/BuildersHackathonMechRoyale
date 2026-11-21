@@ -213,6 +213,28 @@ for (let k = 0; k < N / 2; k++) {
 }
 report("ground to ground at 10 cubes", big)
 
+// start and goal taken from the ground a mech of that size can actually reach
+nav.rebuild(M.radius * (1 + 0.05 * 21))
+const bigCells: number[] = []
+for (let c = 0; c < nav.walk.length; c++) if (nav.comp[c] === nav.mainComp) bigCells.push(c)
+const bigPairs: number[][] = []
+for (let k = 0; k < N / 2; k++) {
+  const a = bigCells[Math.floor(rnd() * bigCells.length)]
+  const c = bigCells[Math.floor(rnd() * bigCells.length)]
+  bigPairs.push([nav.cx(a), nav.cy(a), nav.cx(c), nav.cy(c)])
+}
+console.log(`  (at 21 cubes ${Math.round((100 * bigCells.length) / cells.length)}% of the normally walkable ground is still reachable)`)
+nav.rebuild(M.radius)
+const huge: ReturnType<typeof walk>[] = []
+for (const q of bigPairs) huge.push(walk(q[0], q[1], false, q[2], q[3], 320, 21))
+report("ground to ground at 21 cubes (twice the size)", huge)
+if (TRACE) {
+  // the slowest of them, to see where the time went
+  const slow = [...huge].sort((a, b) => (b.t * 11.7) / Math.max(20, b.straight) - (a.t * 11.7) / Math.max(20, a.straight))[0]
+  console.log(`  slowest at 21 cubes: start ${slow.args[0].toFixed(0)},${slow.args[1].toFixed(0)} goal ${slow.args[3].toFixed(0)},${slow.args[4].toFixed(0)} took ${slow.t.toFixed(0)} s for ${slow.straight.toFixed(0)} m`)
+  walk(slow.args[0], slow.args[1], slow.args[2], slow.args[3], slow.args[4], Math.min(slow.args[5], 120), slow.args[6], TRACE)
+}
+
 const off: ReturnType<typeof walk>[] = []
 for (let k = 0; k < N / 2; k++) {
   const [x, y] = roofs[k]

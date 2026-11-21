@@ -12,8 +12,12 @@ import { readFileSync } from "node:fs"
 import { join } from "node:path"
 
 export const STEP_UP = 1.2
-/** Overhangs lower than this above the ground are treated as walls for walking. */
-const HEADROOM = 11
+/**
+ * Overhangs lower than this above the ground are treated as walls for walking. The map's five
+ * bridges clear the ground by 5 to 11.5 m; a mech is 9 m tall and grows 5% with every cube, so
+ * none of them can be relied on to pass under.
+ */
+const HEADROOM = 12
 
 export class World {
   nx = 0
@@ -91,8 +95,9 @@ export class World {
             const idx = j * nx + i
             const g = terr[idx]
             if (p.top <= g + 0.05) continue // buried
-            if (p.base - g > 0.5) {
-              // air underneath: a slab
+            if (p.base - g > 4.5) {
+              // real air underneath (a bridge, an overhang): a slab. A building whose base sits a
+              // little above dipping ground is just a building: its roof is a roof.
               if (p.base < slabBase[idx]) slabBase[idx] = p.base
               if (p.top > slabTop[idx]) slabTop[idx] = p.top
             } else if (p.top > surf[idx]) surf[idx] = p.top
@@ -138,6 +143,13 @@ export class World {
 
   surface(x: number, y: number): number {
     return this.surf[this.idx(x, y)]
+  }
+
+  /** Height of whatever must be cleared to pass over this spot: the roof, or the deck of a bridge. */
+  over(x: number, y: number): number {
+    const k = this.idx(x, y)
+    const s = this.slabTop[k]
+    return s > this.surf[k] ? s : this.surf[k]
   }
 
   clearance(x: number, y: number): number {

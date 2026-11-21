@@ -44,8 +44,10 @@ function run(dist: number, speed: number, second: string | null, weave: boolean,
   let beams = 0
   let beamHits = 0
   let arcs = 0
-  let t = 0
+  let t = 40 // past the cautious opening, in which the bot fires at nobody who is not shooting at it
   const bullets: { x: number; y: number; z: number; vx: number; vy: number; vz: number; life: number }[] = []
+  const labels = new Map<string, number>()
+  let blocked = 0
   for (let k = 0; k < seconds * 10; k++) {
     const z = w.ground(x, y)
     const tz = w.ground(tx, ty)
@@ -62,6 +64,8 @@ function run(dist: number, speed: number, second: string | null, weave: boolean,
       zone: { center: [41, -73], radius: 560, next_center: [41, -73], next_radius: 380, shrink_start: 600, shrink_end: 650, dps: 20 },
     }
     const a = b.act(obs)
+    labels.set(b.label, (labels.get(b.label) ?? 0) + 1)
+    if (!b.w.los(x, y, z + 7, tx, ty, tz + 4.5)) blocked++
     cmd = a.aim
     for (let sub = 0; sub < 2; sub++) {
       const dt = 0.05
@@ -143,7 +147,8 @@ function run(dist: number, speed: number, second: string | null, weave: boolean,
     }
     t += 0.1
   }
-  return { shots, hits, beams, beamHits, arcs, errors: b.errors as number }
+  const legs = [...labels].sort((p, q) => q[1] - p[1]).map(([k, v]) => `${k} ${v}`).join(", ") + (blocked ? `; no clear line on ${blocked} ticks` : "")
+  return { shots, hits, beams, beamHits, arcs, errors: b.errors as number, legs }
 }
 
 // the most open ground on the map, and the bearing from it with the longest clear, level view
@@ -183,11 +188,11 @@ for (const [d, v] of [[40, 0], [40, 11.7], [80, 11.7], [80, 19.5], [150, 11.7], 
 }
 for (const [d, v] of [[60, 11.7], [150, 11.7], [150, 19.5], [250, 11.7]] as number[][]) {
   const r = run(d, v, "laser", false)
-  console.log(`  laser  ${String(d).padStart(3)} m, target ${String(v).padStart(4)} m/s: ${r.beams} beams, ${pct(r.beamHits, r.beams)} full-charge hits; gun alongside ${r.shots} shots, ${pct(r.hits, r.shots)} hit${r.errors ? "  ERRORS " + r.errors : ""}`)
+  console.log(`  laser  ${String(d).padStart(3)} m, target ${String(v).padStart(4)} m/s: ${r.beams} beams, ${pct(r.beamHits, r.beams)} full-charge hits; gun alongside ${r.shots} shots, ${pct(r.hits, r.shots)} hit${r.errors ? "  ERRORS " + r.errors : ""}  [${r.legs}]`)
 }
 {
   const r = run(30, 11.7, "lightning", false)
-  console.log(`  lightning at the range the bot closes to: trigger held on ${r.arcs} of 400 sub-ticks; gun ${r.shots} shots, ${pct(r.hits, r.shots)} hit`)
+  console.log(`  lightning at the range the bot closes to: trigger held on ${r.arcs} of 400 sub-ticks; gun ${r.shots} shots, ${pct(r.hits, r.shots)} hit  [${r.legs}]`)
 }
 console.log("target changes direction at random (a dodging opponent)")
 for (const [d, v] of [[40, 11.7], [80, 11.7], [150, 11.7]] as number[][]) {

@@ -48,11 +48,18 @@ interface Case {
   hp: number
   charging: boolean
   drop?: boolean
+  /** Put the bot in free-for-all mode before the scenario starts. */
+  ffa?: boolean
+  /** The enemy's shots are landing on us (one damage event a second). */
+  attacking?: boolean
+  /** Laser fire from this far away, from an enemy that is never listed (beyond our sight). */
+  sniper?: number
 }
 
 function run(c: Case, trials: number) {
   const labels = new Map<string, number>()
   let hiddenEnd = 0
+  let rangeEnd = 0
   let fired = 0
   let done = 0
   let errors = 0
@@ -63,9 +70,11 @@ function run(c: Case, trials: number) {
     let [x, y] = s
     const [, , ex, ey] = s
     const b: any = new Brain({ ...hello, seed: n })
+    if (c.ffa) b.ffa = true
     let vx = 0
     let vy = 0
     let yaw = Math.atan2(ey - y, ex - x)
+    let pitch = 0
     let shot = false
     for (let k = 0; k < 40; k++) {
       const t = 30 + k * 0.1
@@ -73,17 +82,19 @@ function run(c: Case, trials: number) {
       const weapons: any[] = [{ kind: "gun", cooldown: 0, ammo: 12, reload: 0, stats: C.weapons.gun }]
       weapons.push(c.mine ? { kind: c.mine, cooldown: 0, charge: 0, stats: C.weapons[c.mine] } : null)
       const obs = {
-        ...base, tick: Math.round(t * 20), t, projectiles: [], crates: [], cubes: [], pickups: [], sounds: [], beams: [], events: [], offer: null,
+        ...base, tick: Math.round(t * 20), t, projectiles: [], crates: [], cubes: [], pickups: [], sounds: [], beams: [], offer: null,
+        events: (c.attacking || c.sniper) && k % 10 === 0 ? [{ type: "damaged", amount: c.sniper ? 315 : 45, weapon: c.sniper ? "laser" : "gun", bearing: Math.atan2(ey - y, ex - x), by: 9 }] : [],
         drops: c.drop ? [{ id: 20000, pos: [x + 30, y, W.ground(x + 30, y)], radius: 8, lands_in: 0, capture_s: 4, progress: 0, holder: null }] : [],
-        self: { ...base.self, pos: [x, y, z], vel: [vx, vy, 0], aim: [yaw, 0], grounded: true, hp: 1400 * c.hp, max_hp: 1400, energy: 100, max_energy: 100, cubes: 0, in_zone: true, weapons, stats: { ...M } },
+        self: { ...base.self, pos: [x, y, z], vel: [vx, vy, 0], aim: [yaw, pitch], grounded: true, hp: 1400 * c.hp, max_hp: 1400, energy: 100, max_energy: 100, cubes: 0, in_zone: true, weapons, stats: { ...M } },
         // listed every tick, as the 5 s memory would: the bot must work out the line of sight itself
-        mechs: [{ id: 9, kind: "mech", pos: [ex, ey, W.ground(ex, ey)], vel: [0, 0, 0], aim: [Math.atan2(y - ey, x - ex), 0], hp: 1400, max_hp: 1400, cubes: 0, weapons: c.theirs, charging: c.charging }],
+        mechs: c.sniper ? [] : [{ id: 9, kind: "mech", pos: [ex, ey, W.ground(ex, ey)], vel: [0, 0, 0], aim: [Math.atan2(y - ey, x - ex), 0], hp: 1400, max_hp: 1400, cubes: 0, weapons: c.theirs, charging: c.charging }],
         zone: { center: [41, -73], radius: 560, next_center: [41, -73], next_radius: 380, shrink_start: 600, shrink_end: 650, dps: 20 },
       }
       const a = b.act(obs)
       labels.set(b.label, (labels.get(b.label) ?? 0) + 1)
       if (a.fire[0] || a.fire[1]) shot = true
       yaw = a.aim[0]
+      pitch = a.aim[1]
       for (let sub = 0; sub < 2; sub++) {
         const acc = M.ground_accel * 0.05
         const dvx = a.move[0] * M.walk_speed - vx
@@ -104,22 +115,34 @@ function run(c: Case, trials: number) {
     const ez = W.ground(ex, ey)
     if (!W.los(ex, ey, ez + 7, x, y, z + 4.5) && !W.los(ex, ey, ez + 7, x, y, z + 8.3)) hiddenEnd++
     if (shot) fired++
+    rangeEnd += Math.hypot(ex - x, ey - y)
     errors += b.errors
   }
   const top = [...labels].sort((p, q) => q[1] - p[1]).map(([k, v]) => `${k} ${Math.round((100 * v) / (done * 40))}%`).join(", ")
-  console.log(`${c.name}\n    legs: ${top}\n    out of sight after 4 s: ${hiddenEnd}/${done}; pulled a trigger in ${fired}/${done}${errors ? "; ERRORS " + errors : ""}`)
+  console.log(`${c.name}\n    legs: ${top}\n    out of sight after 4 s: ${hiddenEnd}/${done}; range after 4 s: ${done ? Math.round(rangeEnd / done) : "-"} m; pulled a trigger in ${fired}/${done}${errors ? "; ERRORS " + errors : ""}`)
 }
 
 const cases: Case[] = [
   { name: "gun vs gun at 150 m, full health (expect: fight)", dist: 150, mine: null, theirs: ["gun"], hp: 1, charging: false },
-  { name: "gun vs gun+laser at 150 m (expect: ambush, out of sight)", dist: 150, mine: null, theirs: ["gun", "laser"], hp: 1, charging: false },
+  { name: "gun vs gun+laser at 150 m (expect: fight: a house bot's laser lands 1 beam in 20 from there)", dist: 150, mine: null, theirs: ["gun", "laser"], hp: 1, charging: false },
   { name: "gun+laser vs gun at 150 m (expect: fight)", dist: 150, mine: "laser", theirs: ["gun"], hp: 1, charging: false },
-  { name: "gun+lightning vs gun+laser at 120 m (expect: ambush)", dist: 120, mine: "lightning", theirs: ["gun", "laser"], hp: 1, charging: false },
-  { name: "half health, enemy with gun at 120 m (expect: heal, out of sight)", dist: 120, mine: null, theirs: ["gun"], hp: 0.5, charging: false },
+  { name: "gun+laser vs gun+laser at 190 m, not attacked (expect: fight, trigger pulled: free shots)", dist: 190, mine: "laser", theirs: ["gun", "laser"], hp: 1, charging: false },
+  { name: "gun+laser vs gun+laser at 70 m (expect: fight, range opening)", dist: 70, mine: "laser", theirs: ["gun", "laser"], hp: 1, charging: false },
+  { name: "gun+lightning vs gun+laser at 120 m (expect: fight, range held or opening)", dist: 120, mine: "lightning", theirs: ["gun", "laser"], hp: 1, charging: false },
+  { name: "60% health, enemy with gun at 120 m (expect: fight on: half health is the line)", dist: 120, mine: "laser", theirs: ["gun"], hp: 0.6, charging: false },
+  { name: "45% health, enemy with gun at 120 m (expect: heal or away, out of sight or range opening)", dist: 120, mine: null, theirs: ["gun"], hp: 0.45, charging: false },
   { name: "half health, enemy at 35 m (expect: fight, they are on us)", dist: 35, mine: null, theirs: ["gun"], hp: 0.5, charging: false },
   { name: "gun+laser vs gun+laser at 90 m, theirs charging on us (expect: laser duck where cover is within a step)", dist: 90, mine: "laser", theirs: ["gun", "laser"], hp: 1, charging: true },
+  { name: "gun+laser vs gun+laser at 150 m, theirs charging on us (expect: fight, no duck)", dist: 150, mine: "laser", theirs: ["gun", "laser"], hp: 1, charging: true },
   { name: "gun vs gun+laser at 35 m (expect: fight, a step from cover)", dist: 35, mine: null, theirs: ["gun", "laser"], hp: 1, charging: false },
 ]
-for (const c of cases) run(c, 40)
+const TRIALS = Number(process.env.TRIALS ?? 40)
+for (const c of cases) run(c, TRIALS)
+console.log("--- an attacker beyond our sight")
+run({ name: "laser hits from 200 m, shooter never visible (expect: unseen, out of its line)", dist: 200, mine: null, theirs: ["gun", "laser"], hp: 0.8, charging: false, sniper: 200 }, TRIALS)
+console.log("--- free-for-all mode")
+run({ name: "passer-by with a gun at 150 m, not shooting (expect: evade, no trigger pulled)", dist: 150, mine: "laser", theirs: ["gun"], hp: 1, charging: false, ffa: true }, TRIALS)
+run({ name: "shot at from 150 m (expect: evade, shooting back while leaving)", dist: 150, mine: "laser", theirs: ["gun"], hp: 1, charging: false, ffa: true, attacking: true }, TRIALS)
+run({ name: "shot at from 40 m (expect: fight)", dist: 40, mine: "laser", theirs: ["gun"], hp: 1, charging: false, ffa: true, attacking: true }, TRIALS)
 TUNING.drops = true
-run({ name: "drops on: half health, landed drop 30 m away, enemy with gun at 150 m (expect: drop or heal)", dist: 150, mine: null, theirs: ["gun"], hp: 0.5, charging: false, drop: true }, 40)
+run({ name: "drops on: half health, landed drop 30 m away, enemy with gun at 150 m (expect: drop or heal)", dist: 150, mine: null, theirs: ["gun"], hp: 0.5, charging: false, drop: true }, TRIALS)

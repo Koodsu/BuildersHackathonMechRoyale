@@ -18,18 +18,37 @@ const wrap = (a: number) => {
   return a - Math.PI
 }
 
-/** Upgrade preference, best first. Survival first, then the weapons we actually use. */
+/** Upgrade preference, best first. Survival first, then the weapons we use at long range. */
 const UPGRADES = [
-  "nanites", "plating", "armor", "gun_damage", "laser_damage", "servos", "gun_rate", "laser_charge",
-  "lightning_efficiency", "capacitor", "reactor", "gyros", "gun_mag", "gun_velocity", "jets",
+  "plating", "armor", "laser_damage", "nanites", "gun_damage", "gun_velocity", "laser_charge", "gun_rate", "servos",
+  "lightning_efficiency", "capacitor", "reactor", "gyros", "gun_mag", "jets",
   "lightning_range", "lightning_chain", "sensors", "laser_pierce", "mortar_reload", "mortar_splash", "mortar_velocity",
 ]
 /** Second-slot weapons we pick up, best first. */
 const WANT = ["laser", "lightning"]
-/** Stop seeking cubes here: HP and damage bonuses cap at 10, size keeps growing. */
+/**
+ * Stop seeking cubes here. The HP and damage bonuses cap at 10, and every cube makes us 5% bigger
+ * with no cap. Past 10 the only gain is one upgrade per 5 to 7 cubes (about +15% of one thing),
+ * paid for with a target a sixth wider each time: at long range, where shots miss by metres, hits
+ * taken grow in step with our width. A wider mech also no longer fits some alleys (a tenth of the
+ * ground is out of reach at 21 cubes) and stands taller than the buildings it hides behind.
+ */
 const CUBE_TARGET = 10
-/** Switches for behaviours we want to score separately. */
-export const TUNING = { drops: false }
+/** Walkable grids are prepared for sizes up to this many cubes; beyond it the last one is used. */
+const NAV_CUBES = 30
+/**
+ * Range we fight house bots from. Measured on the public match feed (three matches, 2100 gun shots
+ * and 100 beams of theirs), their guns land 100% of shots inside 40 m, 57% at 40-80 m, 23% at
+ * 80-120 m, 18% at 120-160 m (the best two kinds 30%), 9% at 160-200 m and none beyond; their
+ * lasers 61% at 40-80 m, 39% at 80-120 m and 1 beam in 39 beyond 120 m. Most of their kills on each
+ * other are made by running in with the 45 m lightning gun. They follow a target that backs away at
+ * about 6 m/s while firing. Our aim leads properly, so distance costs us far less than it costs them.
+ * (The practice squad shares vision and sends its hunters weakest first: one early, more as we thin
+ * them out, all of them late. So the score is the kills we make before the whole squad arrives.)
+ */
+const STANDOFF = 170
+/** Switches for behaviours we may want to score separately. */
+export const TUNING = { drops: true, standoff: true, wary: 22 }
 
 interface Track {
   id: number
@@ -67,6 +86,8 @@ interface Enemy {
   seesMe: boolean
   attacked: boolean
   closing: number
+  /** A mech we clearly out-match: worth going after when kills are what scores. */
+  prey: boolean
 }
 
 interface Item {
@@ -138,6 +159,7 @@ export class Brain {
   // memory
   private tracks = new Map<number, Track>()
   private attackT = new Map<number, number>()
+  private hitT = new Map<number, number>()
   private pickups = new Map<number, Item>()
   private crates = new Map<number, Item>()
   private cubes = new Map<number, Item>()
@@ -146,6 +168,8 @@ export class Brain {
   private dmgOut: { t: number; a: number; to: number }[] = []
   private lastHurtT = -99
   private lastHurtYaw = 0
+  private heardT = -99
+  private heardYaw = 0
 
   // control state
   private cmdYaw = 0
@@ -165,6 +189,50 @@ export class Brain {
   private hist: { t: number; x: number; y: number }[] = []
   private hop: { x: number; y: number } | null = null
   private healing = false
+  private sprint = false
+  private ghostT = 0
+  private zoneNow: any = null
+  private safe: { x: number; y: number; until: number; stay: boolean } | null = null
+  private overTop = false
+  private pathOut = 0
+  private pathAlt = false
+  private navCubes = 0
+  private pathZone = false
+  private kiteGain = 0
+  private mortarFoe = false
+  private rangeNow = STANDOFF
+  private kite: { x: number; y: number; until: number } | null = null
+  private orbitT = -99
+  private orbitDir = 1
+  private lastHurtBy = -1
+  private strangerT = -99
+  private strangerYaw = 0
+  private glanceUntil = -99
+  private glanceYaw = 0
+  private glanceNextT = -99
+  private lookT = -99
+  private lastGlanceEnd = -99
+  private lastSeen = new Map<number, { x: number; y: number; z: number; t: number }>()
+  private farHeardT = -99
+  private farHeardYaw = 0
+  private hopLookT = -99
+  private post: { x: number; y: number; until: number; key: string } | null = null
+  private pathLost = false
+  private pathPartial = false
+  private slowT = -1
+  private noHopUntil = -99
+  /**
+   * Free-for-all detected: mechs are dying that we did not kill, so the others are fighting each
+   * other (in practice the 15 house bots never do). Placement is all that scores, so from then on
+   * we stay out of sight and only shoot back.
+   */
+  ffa = false
+  private wary = false
+  private nearFoes = 0
+  private killCount = 0
+  private foreignHits = 0
+  private ffaSince = -1
+  private lastMechT = -99
   private ambush = false
   private holdUntil = -99
   private npcHurtT = -99
@@ -184,7 +252,8 @@ export class Brain {
   constructor(hello: any) {
     this.cfg = hello.config
     // Mixed with the clock on purpose: two runs of the same build are then two different samples.
-    let s = ((hello.seed ?? 1) ^ (Date.now() & 0x7fffffff) ^ ((hello.slot ?? 0) * 7919)) >>> 0
+    // (tests pass `entropy` to get the same match twice)
+    let s = ((hello.seed ?? 1) ^ ((hello.entropy ?? Date.now()) & 0x7fffffff) ^ ((hello.slot ?? 0) * 7919)) >>> 0
     this.rnd = () => {
       s = (s + 0x6d2b79f5) >>> 0
       let x = Math.imul(s ^ (s >>> 15), 1 | s)
@@ -194,9 +263,31 @@ export class Brain {
     try {
       this.w = new World(hello.map?.dir ?? "/arena", hello.map?.files)
       this.nav = new Nav(this.w)
-      // one walkable grid per size we can grow to, built now so that picking up a cube costs nothing later
+      // One walkable grid per size we can grow to, built now so that picking up a cube costs nothing
+      // later. Smallest first, and only for as long as start-up can spare (the hello budget is 20 s and
+      // covers the container starting): whatever size is not ready uses the largest grid that is.
       const per = this.cfg.cubes?.size_per_cube ?? 0.05
-      for (let c = 14; c >= 0; c--) this.nav.rebuild(this.cfg.mech.radius * (1 + per * c))
+      const r0 = this.cfg.mech.radius
+      const began = Date.now()
+      for (let c = 0; c <= NAV_CUBES && (c <= CUBE_TARGET || Date.now() - began < 4000); c++) {
+        this.nav.rebuild(r0 * (1 + per * c))
+        this.navCubes = c
+      }
+      // run the route search and the sight line a few hundred times so they are compiled before the first tick
+      const nav = this.nav
+      const w = this.w
+      let seed = 12345
+      const rnd = () => ((seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) / 4294967296)
+      for (let k = 0; k < 40 && Date.now() - began < 6000; k++) {
+        const ax = w.bMinX + rnd() * (w.bMaxX - w.bMinX)
+        const ay = w.bMinY + rnd() * (w.bMaxY - w.bMinY)
+        const bx = ax + (rnd() - 0.5) * 300
+        const by = ay + (rnd() - 0.5) * 300
+        nav.rebuild(r0 * (1 + per * (k % 3) * 5))
+        nav.findPath(ax, ay, bx, by, 6000, k % 2 ? { x: ax, y: ay, r: 120, pen: 5 } : undefined, k % 5 === 4 ? 30 : 0)
+        for (let q = 0; q < 60; q++) w.los(ax, ay, w.ground(ax, ay) + 8, ax + (rnd() - 0.5) * 400, ay + (rnd() - 0.5) * 400, 5)
+      }
+      nav.rebuild(r0)
       this.mapOk = true
     } catch (e) {
       log("map load failed, running without it:", e)
@@ -284,8 +375,10 @@ export class Brain {
     this.H = Math.max(st.height ?? 0, cfg.mech.height * sc)
     this.eyeH = st.eye_height ?? cfg.mech.eye_height * sc
     this.muzH = st.muzzle_height ?? cfg.mech.muzzle_height * sc
-    if (Math.abs(this.R - this.nav.radius) > 0.06) {
-      this.nav.rebuild(this.R)
+    // (no new grid in mid-match for a size we did not prepare: building one takes a whole tick's budget)
+    const navR = Math.min(this.R, cfg.mech.radius * (1 + (cfg.cubes?.size_per_cube ?? 0.05) * this.navCubes))
+    if (Math.abs(navR - this.nav.radius) > 0.06) {
+      this.nav.rebuild(navR)
       this.path = null
     }
     this.gun = this.laser = this.light = -1
@@ -301,7 +394,7 @@ export class Brain {
 
     this.remember(obs)
     if (obs.offer?.choices?.length) act.pick = this.pickUpgrade(obs.offer.choices)
-    const zone = this.zoneInfo(obs)
+    const zone = (this.zoneNow = this.zoneInfo(obs))
 
     // --- who matters
     const enemies = this.assess()
@@ -310,6 +403,8 @@ export class Brain {
     let bestScore = Infinity
     for (const e of enemies) {
       let s = e.tr.hp / Math.max(20, this.myDpsAt(e, e.d))
+      // against house bots the near one is the one that hurts: their aim falls apart with distance
+      if (this.far()) s *= clamp(e.d / STANDOFF, 0.5, 1.3)
       if (e.attacked) s *= 0.7
       if (e.tr.id === this.primaryId) s *= 0.8
       if (!e.shootable) s += 100
@@ -319,7 +414,66 @@ export class Brain {
         primary = e
       }
     }
+    // free-for-all: everyone nearby is something to stay away from, and we only shoot at whoever is
+    // shooting us or is one hit from dead
+    // (two deaths that are not ours, standing for a full second so a late kill credit cannot trip it)
+    if (!this.ffa) {
+      // (in the first 45 s one is enough: in the recorded top-16 match three bots were dead by 14 s,
+      // while a house bot can only die that early by our hand)
+      if ((cfg.match?.mechs ?? 16) - obs.alive - this.killCount >= (t < 45 ? 1 : 2)) {
+        if (this.ffaSince < 0) this.ffaSince = t
+        if (t - this.ffaSince >= 1) this.ffa = true
+      } else this.ffaSince = -1
+      // In a real free-for-all the shooting starts at once (half the field can be dead in a minute):
+      // three hits we saw land on others in the opening 90 s settle it without waiting for deaths.
+      if (t < 90 && this.foreignHits >= 3) this.ffa = true
+    }
+    // The opening: in a free-for-all the nearest neighbours open fire within two seconds of the
+    // start, and the first death (8 s in one recorded top-16 match, 26 s in the next) comes too late
+    // to warn us. So for the first 30 s we play it as one: out of sight, no first shots, fighting
+    // only someone who is on top of us. Against house bots that costs one slow start.
+    // (A shortcut out of it, "two mechs in view of each other are not shooting, so they must be house
+    // bots", was tried against the recorded top-16 matches and would have fired wrongly from 22% of
+    // viewpoints: real bots do not always notice each other. So the opening simply runs its course.)
+    // How long: in nine recorded top-16 matches the first death came at 8-16 s in eight and at 26 s
+    // in one, and one death that is not ours settles it. 22 s gives up little of that and hands ten
+    // more seconds of every practice match to the long-range game.
+    this.wary = this.ffa || (t < TUNING.wary && this.killCount === 0)
+    let evade: Enemy[] = []
+    let holdFire = false
+    if (this.wary) {
+      const around = this.assess(true).filter((e) => !e.tr.ghost)
+      const attacker = enemies.find((e) => t - (this.attackT.get(e.tr.id) ?? -99) < 8) ?? null
+      const finish = around.find((e) => e.shootable && e.d < 120 && e.tr.hp < 0.3 * e.tr.maxHp) ?? null
+      // While we do not know what kind of match this is: someone walking at us with their guns on us
+      // is coming for us whichever it is (a house bot hunting, or a rival who has picked us). The
+      // first shots at long range are ours to take, still backing away.
+      const incoming = this.ffa ? null : (around.find((e) => e.shootable && e.d <= 215 && e.closing > 3 && Math.abs(wrap(e.tr.aimYaw - (e.yaw + Math.PI))) < 0.25) ?? null)
+      const pressed = !!attacker && (attacker.tr.ghost || attacker.d < 80)
+      // in the last small circles there is nowhere left to avoid anyone: fight normally
+      this.nearFoes = around.length
+      if (!this.ffa && (attacker || incoming)) {
+        // The kind of match is not settled yet and someone is on us. If it is a house bot it knows
+        // where we are whatever we do (the squad shares vision), and hiding only gives its friends
+        // time to grow: fight it the long-range way, giving ground. If it is a rival, the first death
+        // elsewhere (8-16 s in most recorded matches) turns the caution back on.
+        primary = attacker ?? incoming
+      } else if (!pressed && zone.nr > 30) {
+        // Get away from anyone inside sight range or with a line on us. Someone further off who has
+        // not noticed us is no reason to stop collecting weapons and cubes: the bots that win these
+        // matches are the ones that arrive at the end with the most health.
+        evade = around.filter((e) => e.d < 205 || (e.seesMe && e.d < 270)).slice(0, 5)
+        primary = attacker ?? finish
+        holdFire = !primary
+      } else if (pressed) primary = attacker // cornered: deal with the one who is on us, not a bystander
+    } else this.nearFoes = 0
+    // The squad sends one hunter at a time at first, its weakest (their guns land 2-14% beyond 80 m),
+    // and what counts then is how fast it dies: from 140 m our gun lands more and a line of fire is
+    // easier to keep. Once they come in numbers, or after the easy ones are gone, the full distance.
+    this.rangeNow = threats.length <= 1 && this.killCount < 4 ? STANDOFF - 30 : STANDOFF
     this.primaryId = primary ? primary.tr.id : -1
+    // how long the enemy we are dealing with has been one we cannot see
+    if (!primary || !primary.tr.ghost) this.ghostT = t
     if (primary && !primary.tr.ghost && !threats.includes(primary)) threats[threats.length >= 4 ? 3 : threats.length] = primary
     if (primary?.shootable) this.lastShotT = t
 
@@ -363,7 +517,15 @@ export class Brain {
       mv = { x: this.unstuckX, y: this.unstuckY, boost: false, jump: false }
       label = "unstuck"
     } else if (zone.urgent) {
-      mv = this.travel({ x: zone.gx, y: zone.gy, stop: 2, boost: !me.in_zone || zone.tight, kind: "zone" })
+      // (the last circle closes on a point: every metre off it is seconds outside at the very end, so
+      // walk right onto it, slowing over the last steps so as not to run past)
+      const last = zone.nr <= 1
+      mv = this.travel({ x: zone.gx, y: zone.gy, stop: last ? 0.3 : 2, boost: !me.in_zone || zone.tight, kind: "zone" })
+      const left = hyp(zone.gx - mx, zone.gy - my)
+      if (last && left < 3 && me.grounded) {
+        const k = clamp(left / 3, 0.12, 1)
+        mv = { x: mv.x * k, y: mv.y * k, boost: false, jump: mv.jump }
+      }
       label = "zone"
     } else if (danger && !primary) {
       const d = hyp(mx - danger.x, my - danger.y) || 1
@@ -371,11 +533,37 @@ export class Brain {
       label = "dodge"
     } else if (primary && primary.tr.ghost) {
       // being hit by someone we cannot see: sidestep across their line of fire while the torso looks for them
-      this.flipStrafe(0.5)
-      const px = -Math.sin(primary.yaw) * this.strafe
-      const py = Math.cos(primary.yaw) * this.strafe
-      mv = this.nav.lineWalkable(mx, my, mx + px * 6, my + py * 6, 0.3) ? { x: px, y: py, boost: false, jump: false } : { x: -px, y: -py, boost: false, jump: false }
-      label = "ghost"
+      // If turning to look has not found them within a second they are beyond our sight (a laser
+      // out-ranges our eyes): put a building between us and that bearing.
+      const unseen = t - this.ghostT > 1 ? this.hide(primary, [primary], shells, zone, true, 140, 10.5) : null
+      if (unseen) {
+        mv = unseen
+        label = "unseen"
+        this.holdUntil = t + 10 // stay put for a while once the firing stops, instead of walking back into it
+      } else {
+        this.flipStrafe(100)
+        const px = -Math.sin(primary.yaw) * this.strafe
+        const py = Math.cos(primary.yaw) * this.strafe
+        mv = this.nav.lineWalkable(mx, my, mx + px * 6, my + py * 6, 0.3) ? { x: px, y: py, boost: me.energy > 30, jump: false } : { x: -px, y: -py, boost: me.energy > 30, jump: false }
+        label = "ghost"
+      }
+    } else if (evade.length) {
+      // Free-for-all. Someone has a line on us: break it first. Otherwise put distance between us
+      // and everyone we know of (out of sight range nobody can start on us at all).
+      const near = evade[0]
+      const watched = evade.some((e) => e.seesMe && e.d < 260)
+      let got: Move | null = watched ? this.hide(near, evade, shells, zone, near.d < 150, 60, 10.5) : null
+      if (!got) {
+        const sp = this.safeSpot(zone)
+        if (sp) got = this.travel({ x: sp.x, y: sp.y, stop: 4, boost: watched && me.energy > 20, kind: "away" })
+      }
+      if (!got) {
+        const c = this.local("hide", near, evade, 0, shells, zone, 10.5)
+        got = c ? this.toward(c.x, c.y, me.energy > 30 && near.d < 100) : still
+      }
+      mv = got
+      this.holdUntil = t + 4
+      label = "evade"
     } else if (primary) {
       const recent = primary.shootable || t - this.lastShotT < 1
       const close = primary.d < 60 && t - primary.tr.t <= 2
@@ -387,7 +575,9 @@ export class Brain {
         got = this.travel({ x: drop.x, y: drop.y, stop: 1.5, boost: me.energy > 15, kind: "drop" })
         label = "drop"
       } else if (this.retreat && !this.ring) {
-        got = this.hide(primary, threats, shells, zone, true, 140, 10.5)
+        // against house bots distance is as good as a wall and they do not get to walk up to us
+        if (this.far()) got = this.runOff(zone)
+        if (!got) got = this.hide(primary, threats, shells, zone, true, 140, 10.5)
         if (!got) {
           // nowhere to hide: back away while fighting
           const c = this.local("fight", primary, threats, primary.d + 40, shells, zone, 10.5)
@@ -396,25 +586,78 @@ export class Brain {
         label = "hide"
       } else if (why) {
         const quick = why === "laser" || why === "reload"
-        got = this.hide(primary, threats, shells, zone, why !== "reload", quick ? 0 : 140, quick ? 6.5 : 10.5)
+        // (house bots: out-gunned or hurt, the answer is distance, not a wall they can walk round)
+        if ((why === "heal" || why === "ambush") && this.far()) got = this.runOff(zone)
+        if (!got) got = this.hide(primary, threats, shells, zone, why !== "reload", quick ? 0 : 140, quick ? 6.5 : 10.5)
         if (got) {
           label = why
           // if they drop out of our memory while we wait, keep waiting about as long as their walk here takes
           if (!quick) this.holdUntil = t + clamp(primary.d / 9 + 5, 6, 20)
         }
       }
+      // (house bots: tracked is enough. They know where we are and keep coming while a building
+      // hides them, half again as fast as when they are shooting: standing still to wait gave up
+      // 50 m in 5 s in the walk-at-us check.)
+      const tracked = this.far() && !primary.tr.ghost && t - primary.tr.t <= 0.3 && primary.d < 240
       if (got) mv = got
-      else if (recent || close || this.ring) {
-        this.flipStrafe(clamp(primary.d / 252 + 0.15, 0.3, 0.9))
-        const pref = this.prefRange(primary)
+      else if (recent || close || this.ring || tracked) {
+        // (someone with a mortar in view: long sweeps one way, so that we are 7 m from where the
+        // shell was sent by the time it lands; a quick back-and-forth ends up where it started)
+        this.mortarFoe = threats.some((e) => e.tr.weapons.includes("mortar")) || primary.tr.weapons.includes("mortar")
+        this.flipStrafe(this.mortarFoe ? 30 : primary.d)
+        // If they are coming to us there is nothing to gain by meeting them half way: keep all our
+        // speed sideways and let the range close by itself, down to the one we want.
+        const want = this.prefRange(primary)
+        const pref = primary.closing > 2 && primary.d > want ? Math.max(want, primary.d - 18) : want
         const c = this.local("fight", primary, threats, pref, shells, zone, 10.5)
         // out-gunned at range with no cover to wait behind: close the distance fast
         const rush = why === "ambush" || why === "heal" ? primary.d > pref + 15 && me.energy > 15 : primary.d > pref + 50 && me.energy > 40
-        mv = c ? this.toward(c.x, c.y, rush) : still
+        // run while sidestepping when the jets can spare it: a faster target is a harder one. Not
+        // when our own lightning needs the energy, and always when theirs is closing on us.
+        if (me.energy > 60) this.sprint = true
+        else if (me.energy < 25) this.sprint = false
+        const kite = primary.tr.weapons.includes("lightning") && this.light < 0 && primary.d < 75 && me.energy > 8
+        const zap = this.light >= 0 && primary.d < 60
+        // standing off: run when one of them gets well inside the range we want. No running just to be
+        // a faster target: against house bots sideways speed made no difference to how often they hit.
+        const far = this.far()
+        let nearT = primary.d
+        for (const e of threats) nearT = Math.min(nearT, e.d)
+        let closing = 0
+        for (const e of threats) if (e.d < this.rangeNow - 45) closing = Math.max(closing, e.closing)
+        const back = far && me.energy > 15 && (nearT < 70 || (nearT < this.rangeNow - 45 && closing > 2))
+        mv = c ? this.toward(c.x, c.y, rush || kite || back || (this.sprint && !far && !zap && primary.d > 25)) : still
+        if (far) {
+          // Against house bots the legs have one job, the range. Too close: make for a spot well
+          // away from all of them, by a route (a step-by-step retreat dithers and walks into dead
+          // ends; measured with dummies walking at us). At range with a line of fire: stand still
+          // and shoot (their aim does not care whether we move). No line of fire: the step above
+          // finds one.
+          if (nearT < this.rangeNow - 5) {
+            const sp = this.kiteSpot(primary, threats, zone)
+            if (sp) mv = this.travel({ x: sp.x, y: sp.y, stop: 2, boost: back, kind: "kite" })
+            else {
+              // Nowhere within reach is further from them than here: hemmed in. Break as many of
+              // their lines as a wall will, and fight from there. (Two escape plans taking turns
+              // tick by tick left the bot standing in the open in the walk-at-us check.)
+              const cov = this.hide(primary, threats, shells, zone, back, 60, 10.5)
+              if (cov) mv = cov
+            }
+          } else if (primary.shootable && primary.d <= pref + 25 && !this.mortarFoe && !shells.some((sh) => hyp(mx - sh.x, my - sh.y) < sh.r + 3)) mv = still
+        }
         label = "fight"
-      } else if (primary.attacked || primary.tr.hp < primary.tr.maxHp * 0.6) {
+        // Still without a laser, one lying within reach, and nobody close: fetch it now, shooting as
+        // we go. From this range it triples what we deal.
+        if (far && this.laser < 0 && nearT > 80) {
+          const lz = this.laserNear(zone, 130)
+          if (lz) {
+            mv = this.travel(lz)
+            label = "weapon"
+          }
+        }
+      } else if (!this.far() && (primary.attacked || primary.prey || primary.tr.hp < primary.tr.maxHp * 0.6)) {
         // lost sight of someone worth finishing, and we are healthy: go and find them
-        mv = this.travel({ x: primary.x, y: primary.y, stop: 25, boost: false, kind: "hunt" })
+        mv = this.travel({ x: primary.x, y: primary.y, stop: this.far() ? STANDOFF - 10 : 25, boost: false, kind: "hunt" })
         label = "hunt"
       } else {
         const g = this.chooseGoal(zone, hpFrac)
@@ -423,11 +666,20 @@ export class Brain {
       }
     } else {
       this.ambush = false
-      if (drop && (hpFrac < 0.98 || (me.cubes ?? 0) < CUBE_TARGET + 3)) {
+      if (drop && (hpFrac < 0.6 || (me.cubes ?? 0) < CUBE_TARGET)) {
         mv = this.travel({ x: drop.x, y: drop.y, stop: 1.5, boost: drop.d / 9 > drop.lands && me.energy > 30, kind: "drop" })
         label = "drop"
       } else if (t < this.holdUntil) {
         label = "hold" // the hunter we hid from is on its way: stay behind cover, heal, and watch
+      } else if (hpFrac < 0.6 && t - this.npcHurtT > 4) {
+        // Badly hurt with nobody in sight: 45 HP/s comes back after 5 quiet seconds, and standing
+        // still makes no sound. Walking on at this health only finds the next fight sooner. Cubes
+        // and a weapon within a few steps are still worth the walk (a cube is health too).
+        const g = this.chooseGoal(zone, hpFrac)
+        if ((g.kind === "cube" || g.kind === "weapon") && hyp(g.x - mx, g.y - my) < 45) {
+          mv = this.travel(g)
+          label = g.kind
+        } else label = "rest"
       } else {
         const g = this.chooseGoal(zone, hpFrac)
         mv = this.travel(g)
@@ -435,25 +687,27 @@ export class Brain {
       }
     }
     this.watchStuck(mv, label)
-    this.watchStuck(mv, label)
 
     // --- torso and triggers
-    const aim = this.aimAndFire(act, primary, enemies, hpFrac, label)
+    const aim = this.aimAndFire(act, primary, enemies, hpFrac, label, holdFire)
     act.move = [mv.x, mv.y]
     act.boost = mv.boost
     act.jump = mv.jump
     act.aim = aim
 
-    // --- pick up a second weapon when standing on one
-    if (me.weapons.some((x: any) => !x)) {
+    // --- pick up a second weapon when standing on one (a laser also in place of anything but the gun)
+    const empty = me.weapons.some((x: any) => !x)
+    const swap = empty || this.laser >= 0 ? -1 : me.weapons.findIndex((x: any) => x && x.kind !== "gun")
+    if (empty || swap >= 0) {
       const reach = (cfg.loot?.pickup_radius ?? 4) * 0.95
-      let bestRank = 99
+      let bestRank = empty ? 99 : 1
       for (const p of obs.pickups) {
         const rank = WANT.indexOf(p.kind)
         if (rank < 0 || rank >= bestRank || this.ignore.has(p.id)) continue
         if (hyp(p.pos[0] - mx, p.pos[1] - my) <= reach && Math.abs(p.pos[2] - mz) <= 3.8) {
           bestRank = rank
           act.take = p.id
+          if (!empty) act.drop = swap
         }
       }
     }
@@ -466,13 +720,22 @@ export class Brain {
     const t = this.t
     const me = this.me
     const [mx, my, mz] = me.pos as number[]
+    const ours = new Set<number>()
+    for (const e of obs.events) if (e.type === "hit" && typeof e.target === "number") ours.add(e.target)
     for (const m of obs.mechs) {
       let tr = this.tracks.get(m.id)
+      // A mech in view losing a gun shot's worth of health (40+; a drone does 25, the zone less) in
+      // one tick, when we did not hit it: somebody else did. House bots never fight each other.
+      if (tr && !tr.npc && !tr.ghost && m.kind !== "npc" && typeof m.hp === "number" && t - tr.t <= 0.25 && tr.hp - m.hp >= 40 && !ours.has(m.id) && t - (this.hitT.get(m.id) ?? -99) > 0.3) this.foreignHits++
       if (!tr) {
         tr = { id: m.id, npc: false, ghost: false, x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, aimYaw: 0, hp: 1400, maxHp: 1400, cubes: 0, weapons: [], charging: false, chargeT: -1, t }
         this.tracks.set(m.id, tr)
       }
       tr.npc = m.kind === "npc"
+      if (!tr.npc) {
+        this.lastMechT = t
+        this.lastSeen.set(m.id, { x: m.pos[0], y: m.pos[1], z: m.pos[2], t })
+      }
       tr.ghost = false
       tr.x = m.pos[0]
       tr.y = m.pos[1]
@@ -496,6 +759,53 @@ export class Brain {
     this.sync(this.crates, obs.crates)
     this.sync(this.cubes, obs.cubes)
 
+    // A beam we saw starts at its shooter's muzzle: that pins down someone firing from beyond our
+    // sight (a laser reaches 280 m, our eyes 200) far better than the bearing of the hit.
+    for (const b of obs.beams ?? []) {
+      const p0 = b.path?.[0]
+      const p1 = b.path?.[1]
+      if (typeof b.by !== "number" || b.by >= 100 || !p0 || !p1) continue
+      const old = this.tracks.get(b.by)
+      if (old && !old.ghost && t - old.t < 0.5) continue
+      const floor = this.w.surface(p0[0], p0[1])
+      this.tracks.set(b.by, {
+        id: b.by, npc: false, ghost: true, x: p0[0], y: p0[1], z: Math.max(floor, p0[2] - this.cfg.mech.muzzle_height * 1.5),
+        vx: 0, vy: 0, vz: 0, aimYaw: Math.atan2(p1[1] - p0[1], p1[0] - p0[0]),
+        hp: old?.hp ?? 1400, maxHp: old?.maxHp ?? 1400, cubes: old?.cubes ?? 0,
+        weapons: old?.weapons?.includes(b.kind) ? old.weapons : [...(old?.weapons ?? ["gun"]), b.kind], charging: false, chargeT: -1, t,
+      })
+    }
+    // Sounds: something close that we may not see yet is worth a look (and, in a free-for-all, is
+    // company: keep quiet).
+    for (const sd of obs.sounds ?? []) {
+      if (typeof sd.bearing !== "number" || sd.kind === "npc_gun" || sd.kind === "crate" || sd.kind === "drop" || sd.kind === "death" || sd.kind === "explosion") continue
+      if (sd.dist === "near") {
+        this.lastMechT = Math.max(this.lastMechT, t)
+        if (t - this.heardT > 3) {
+          this.heardT = t
+          this.heardYaw = sd.bearing
+        }
+      } else if (sd.dist === "mid") this.lastMechT = Math.max(this.lastMechT, t - 6)
+      // Movement or a charging laser where we know of nobody: someone is coming that we are not
+      // looking at (we see 120 degrees; a fight keeps our eyes on one of them).
+      if (sd.dist === "near" || (sd.dist === "mid" && (sd.kind === "boost" || sd.kind === "jet" || sd.kind === "laser_charge"))) {
+        let known = false
+        for (const tr of this.tracks.values()) {
+          if (tr.npc || tr.ghost || t - tr.t > 2) continue
+          if (Math.abs(wrap(Math.atan2(tr.y - me.pos[1], tr.x - me.pos[0]) - sd.bearing)) < 0.45) known = true
+        }
+        if (!known) {
+          this.strangerT = t
+          this.strangerYaw = sd.bearing
+        }
+      }
+      // weapons fire further off: where the others are, for when we go looking for them
+      if (sd.dist !== "near" && (sd.kind === "gun" || sd.kind === "laser" || sd.kind === "lightning")) {
+        this.farHeardT = t
+        this.farHeardYaw = sd.bearing
+      }
+    }
+
     for (const e of obs.events) {
       if (e.type === "damaged") {
         this.dmgIn.push({ t, a: e.amount ?? 0 })
@@ -503,21 +813,36 @@ export class Brain {
         if (typeof e.by === "number" && e.by < 100) {
           this.attackT.set(e.by, t)
           this.lastHurtT = t
+          this.lastHurtBy = e.by
           if (typeof e.bearing === "number") this.lastHurtYaw = e.bearing
           const tr = this.tracks.get(e.by)
           if ((!tr || t - tr.t > 1.5) && typeof e.bearing === "number") {
-            const guess = e.weapon === "lightning" ? 30 : e.weapon === "gun" ? 90 : e.weapon === "mortar" ? 80 : 130
+            // Somewhere along that bearing, with a clear line to us. Put it at the far end of the
+            // clear stretch: hiding from there hides us from anything nearer on the same line.
+            const reach = e.weapon === "lightning" ? 45 : e.weapon === "gun" ? 230 : e.weapon === "mortar" ? 120 : 280
+            let guess = 20
+            for (let q = 30; q <= reach; q += 10) {
+              const qx = mx + Math.cos(e.bearing) * q
+              const qy = my + Math.sin(e.bearing) * q
+              if (!this.w.inGrid(qx, qy) || !this.w.los(qx, qy, this.w.surface(qx, qy) + 7, mx, my, mz + this.H / 2)) break
+              guess = q
+            }
             this.tracks.set(e.by, {
               id: e.by, npc: false, ghost: true,
-              x: mx + Math.cos(e.bearing) * guess, y: my + Math.sin(e.bearing) * guess, z: mz,
+              x: mx + Math.cos(e.bearing) * guess, y: my + Math.sin(e.bearing) * guess, z: this.w.surface(mx + Math.cos(e.bearing) * guess, my + Math.sin(e.bearing) * guess),
               vx: 0, vy: 0, vz: 0, aimYaw: e.bearing + Math.PI,
               hp: tr?.hp ?? 1400, maxHp: tr?.maxHp ?? 1400, cubes: tr?.cubes ?? 0,
               weapons: tr?.weapons ?? [e.weapon], charging: false, chargeT: -1, t,
             })
           }
         }
-      } else if (e.type === "hit") this.dmgOut.push({ t, a: e.amount ?? 0, to: e.target })
+      } else if (e.type === "hit") {
+        this.dmgOut.push({ t, a: e.amount ?? 0, to: e.target })
+        if (typeof e.target === "number" && e.target < 100) this.hitT.set(e.target, t)
+      }
       else if (e.type === "kill") {
+        this.killCount++
+        this.lastSeen.delete(e.target)
         this.tracks.delete(e.target)
         this.attackT.delete(e.target)
       } else if (e.type === "took") this.pickups.delete(e.id)
@@ -578,23 +903,89 @@ export class Brain {
       const f = clamp((tau - z.shrink_start) / span, 0, 1)
       return { x: this.zFrom.x + (nx - this.zFrom.x) * f, y: this.zFrom.y + (ny - this.zFrom.y) * f, r: this.zFrom.r + (nr - this.zFrom.r) * f }
     }
-    const soon = at(t + 5)
+    const soon = at(t + 6)
     const walk = (me.stats?.walk_speed ?? 11.7) * 0.7
     const inner = Math.max(0, nr - Math.min(40, nr * 0.6))
     const dn = hyp(mx - nx, my - ny)
     const outside = dn - Math.max(0, nr - Math.min(25, nr * 0.5))
     const late = outside > 0 && t + outside / walk + 8 >= z.shrink_end
-    const edge = hyp(mx - soon.x, my - soon.y) > Math.min(soon.r, z.radius) - 15
-    const urgent = !me.in_zone || late || edge
-    // nearest point of the inner disk of the next circle
-    let gx = nx
-    let gy = ny
+    const edge = hyp(mx - soon.x, my - soon.y) > Math.min(soon.r, z.radius) - 18
+    // Small circles hurt (100 HP/s and up) and the walk in can be a long way round: go as soon as the
+    // next one is announced instead of racing its edge.
+    // The very last point (radius 0) is always a few steps away inside a 25 m circle, so that one can
+    // wait until the shrink is about to start; until then we are free to fight.
+    const endgame = ((z.dps ?? 0) >= 100 || nr <= 70) && dn > inner + 3 && (nr > 1 || t + dn / walk + 8 >= z.shrink_start)
+    const urgent = !me.in_zone || late || edge || endgame
+    // Stay inside the circle as it is now and as it will be in a few seconds, with a margin: the next
+    // centre can sit right on the present edge (the last one, of radius 0, often does).
+    const inside = (x: number, y: number) => hyp(x - z.center[0], y - z.center[1]) <= z.radius - 5 && hyp(x - soon.x, y - soon.y) <= soon.r - 5
+    const g = this.zonePoint(nx, ny, nr, inner, inside, soon)
+    // a circle can close on a point off the edge of the map: the nearest we can stand is the edge
+    g.x = clamp(g.x, this.w.bMinX + this.R + 1.5, this.w.bMaxX - this.R - 1.5)
+    g.y = clamp(g.y, this.w.bMinY + this.R + 1.5, this.w.bMaxY - this.R - 1.5)
+    return { urgent, dps: z.dps ?? 0, tight: hyp(mx - soon.x, my - soon.y) > soon.r - 5, gx: g.x, gy: g.y, nx, ny, nr, inner, cx: soon.x, cy: soon.y, cr: Math.min(soon.r, z.radius), shrinkStart: z.shrink_start, curX: z.center[0], curY: z.center[1], curR: z.radius }
+  }
+
+  /**
+   * Where to stand inside the next circle: the nearest point of its inner disk if that is open
+   * ground, else the nearest open ground inside it, else (the circle is all buildings) a roof low
+   * enough to jet onto. The zone is a circle on the map, so a roof inside it counts.
+   */
+  private zonePoint(nx: number, ny: number, nr: number, inner: number, inside: (x: number, y: number) => boolean, soon: { x: number; y: number; r: number }): { x: number; y: number } {
+    const [mx, my] = this.me.pos as number[]
+    const nav = this.nav
+    const w = this.w
+    const dn = hyp(mx - nx, my - ny)
+    let px = nx
+    let py = ny
     if (dn > 1e-6 && inner > 0) {
       const k = Math.min(1, inner / dn)
-      gx = nx + (mx - nx) * k
-      gy = ny + (my - ny) * k
+      px = nx + (mx - nx) * k
+      py = ny + (my - ny) * k
     }
-    return { urgent, tight: hyp(mx - soon.x, my - soon.y) > soon.r - 5, gx, gy, nx, ny, nr, inner, cx: soon.x, cy: soon.y, cr: Math.min(soon.r, z.radius), shrinkStart: z.shrink_start, curX: z.center[0], curY: z.center[1], curR: z.radius }
+    const ground = (x: number, y: number) => inside(x, y) && nav.free(x, y, 0.5) && nav.snap(x, y, 1) >= 0
+    if (ground(px, py)) return { x: px, y: py }
+    // late on, being near the next centre matters more than a short walk
+    const pull = nr <= 25 ? 1 : 0.3
+    let best: { x: number; y: number } | null = null
+    let bd = Infinity
+    const scan = (cx: number, cy: number, lim: number, ok: (x: number, y: number) => boolean) => {
+      const step = Math.max(3, lim / 8)
+      for (let r = 0; r <= lim + 0.01; r += step)
+        for (let k = 0; k < (r === 0 ? 1 : 16); k++) {
+          const x = cx + Math.cos((k * TAU) / 16) * r
+          const y = cy + Math.sin((k * TAU) / 16) * r
+          if (!ok(x, y)) continue
+          const d = hyp(x - mx, y - my) + hyp(x - nx, y - ny) * pull
+          if (d < bd) {
+            bd = d
+            best = { x, y }
+          }
+        }
+    }
+    const roof = (x: number, y: number) => {
+      if (!inside(x, y) || !w.inGrid(x, y)) return false
+      const f = w.idx(x, y)
+      const h = w.surf[f] - w.terr[f]
+      if (h <= STEP_UP || h > 45 || w.slabBase[f] < Infinity) return false
+      for (let q = 0; q < 8; q++) if (Math.abs(w.surface(x + Math.cos(q * 0.7854) * this.R, y + Math.sin(q * 0.7854) * this.R) - w.surf[f]) > STEP_UP) return false
+      return true
+    }
+    // the next centre pulled inside what is safe right now
+    let qx = nx
+    let qy = ny
+    const ds = hyp(nx - soon.x, ny - soon.y)
+    if (ds > Math.max(0, soon.r - 6)) {
+      const k = Math.max(0, soon.r - 6) / (ds || 1)
+      qx = soon.x + (nx - soon.x) * k
+      qy = soon.y + (ny - soon.y) * k
+    }
+    scan(nx, ny, inner, ground)
+    if (!best) scan(nx, ny, Math.max(0, nr - 4), ground)
+    if (!best) scan(qx, qy, 16, ground)
+    if (!best) scan(nx, ny, inner, roof)
+    if (!best) scan(qx, qy, 16, roof)
+    return best ?? { x: qx, y: qy }
   }
 
   /** Will this spot still be inside the zone if we walk there now? */
@@ -607,7 +998,7 @@ export class Brain {
 
   // ------------------------------------------------------------------ enemies
 
-  private assess(): Enemy[] {
+  private assess(all = false): Enemy[] {
     const me = this.me
     const t = this.t
     const cfg = this.cfg
@@ -630,16 +1021,49 @@ export class Brain {
       const cz = z + hgt / 2
       const emz = z + cfg.mech.muzzle_height * sc
       const attacked = t - (this.attackT.get(tr.id) ?? -99) < 12
+      const fighting = t - (this.hitT.get(tr.id) ?? -99) < 8
       const closing = d > 1 ? -((tr.vx - me.vel[0]) * dx + (tr.vy - me.vel[1]) * dy) / d : 0
       const pointing = Math.abs(wrap(tr.aimYaw - Math.atan2(-dy, -dx))) < 0.25
-      if (!(attacked || d <= 120 || (d <= 280 && (closing > 3 || pointing)))) continue
+      // (their health times their firepower against ours: 1.6 to 1 in our favour is worth starting)
+      const prey = !this.wary && !tr.ghost && age <= 5 && d <= 230 && this.outmatch(tr) >= 1.6
+      // house bots: anyone we can see is worth shooting at from out here, where they cannot answer
+      const target = this.far() && !this.wary && !tr.ghost && age <= 2 && d <= 215
+      if (all ? d > 280 : !(attacked || fighting || prey || target || d <= 120 || (d <= 280 && (closing > 3 || pointing)))) continue
       const fresh = !tr.ghost && age <= 0.15
       const shootable = fresh && d <= maxRange && this.w.los(mx, my, mz + this.muzH, x, y, cz)
       const seesMe = fresh && this.w.los(x, y, emz, mx, my, mz + this.H / 2)
-      out.push({ tr, x, y, z, d, yaw: Math.atan2(dy, dx), rad: cfg.mech.radius * sc, hgt, cz, mz: emz, shootable, seesMe, attacked, closing })
+      out.push({ tr, x, y, z, d, yaw: Math.atan2(dy, dx), rad: cfg.mech.radius * sc, hgt, cz, mz: emz, shootable, seesMe, attacked, closing, prey })
     }
     out.sort((a, b) => a.d - b.d)
     return out
+  }
+
+  /**
+   * How a straight fight with this mech would go: (our health x our firepower) over (theirs x
+   * theirs), all from what we can see of them. Above 1 we win it; we only start one well above.
+   */
+  private outmatch(tr: Track): number {
+    const me = this.me
+    const cfg = this.cfg
+    const W = cfg.weapons
+    if (me.hp < 0.7 * me.max_hp || me.weapons.some((x: any) => !x)) return 0 // not hurt, and with both weapons
+    const cap = cfg.cubes?.stat_cap ?? 10
+    const per = cfg.cubes?.damage_per_cube ?? 0.04
+    const gunS = (W.gun.damage * W.gun.mag) / (W.gun.mag * W.gun.cooldown + W.gun.reload)
+    const power = (ws: string[], cubes: number, gunAcc: number, beamAcc: number) => {
+      let p = 0
+      if (ws.includes("gun")) p += gunS * gunAcc
+      if (ws.includes("laser")) p += (W.laser.damage / (W.laser.charge + W.laser.cooldown)) * beamAcc
+      if (ws.includes("lightning")) p += (W.lightning.damage / W.lightning.cooldown) * 0.5
+      if (ws.includes("mortar")) p += 40
+      return Math.max(20, p) * (1 + per * Math.min(cubes, cap))
+    }
+    // (ours: the best team bots on the feed land about 60% of gun shots and 65-75% of beams on each other)
+    const mine = power(me.weapons.map((x: any) => x?.kind ?? ""), me.cubes ?? 0, 0.6, 0.75)
+    const theirs = power(tr.weapons.length ? tr.weapons : ["gun"], tr.cubes, 0.5, 0.4)
+    // their upgrades are invisible except through max_hp; assume one armour upgrade per five cubes
+    const theirHp = tr.hp / Math.max(0.6, 1 - 0.04 * Math.floor(tr.cubes / 5))
+    return (me.hp * mine) / Math.max(1, theirHp * theirs)
   }
 
   /** Sustained damage per second we expect to land on this enemy from range d. */
@@ -650,7 +1074,7 @@ export class Brain {
     let dps = 0
     if (this.gun >= 0) {
       const s = me.weapons[this.gun].stats
-      if (d <= s.range) dps += ((s.damage * s.mag) / (s.mag * s.cooldown + s.reload)) * clamp(1.05 - d / 300, 0.35, 0.95)
+      if (d <= s.range) dps += ((s.damage * s.mag) / (s.mag * s.cooldown + s.reload)) * clamp(1.1 - d / 400, 0.55, 0.85)
     }
     if (this.laser >= 0) {
       const s = me.weapons[this.laser].stats
@@ -665,7 +1089,6 @@ export class Brain {
 
   /**
    * The same for them against us, from the base weapon numbers (their upgrades are not visible).
-   * Their gun is assumed to miss a sidestepping target more and more with range; a laser never misses.
    */
   private theirDpsAt(e: Enemy, d: number): number {
     const cfg = this.cfg
@@ -673,11 +1096,18 @@ export class Brain {
     const cm = 1 + (cfg.cubes?.damage_per_cube ?? 0.04) * Math.min(e.tr.cubes, cfg.cubes?.stat_cap ?? 10)
     const has = (k: string) => e.tr.weapons.includes(k)
     let dps = 0
+    // Share of shots that land by range, measured on the public match feed. House bots: guns 100%
+    // inside 40 m, 57% to 80 m, 23% to 120 m, 18% to 160 m, 9% beyond; lasers 61% to 80 m, 39% to
+    // 120 m, 3% beyond. The top teams' bots (six matches): guns 100 / 83 / 55 / 40 / 33%, lasers
+    // about 72% at any range.
+    const step = (v: number[]) => (d < 40 ? v[0] : d < 80 ? v[1] : d < 120 ? v[2] : d < 160 ? v[3] : v[4])
+    const gunAcc = this.ffa ? step([1, 0.83, 0.55, 0.4, 0.33]) : step([1, 0.57, 0.25, 0.2, 0.1])
+    const beamAcc = this.ffa ? 0.72 : step([0.65, 0.6, 0.4, 0.05, 0.03])
     if (has("gun") || !e.tr.weapons.length) {
       const g = W.gun
-      if (d <= g.range) dps += ((g.damage * g.mag) / (g.mag * g.cooldown + g.reload)) * clamp(1 - d / 130, 0.15, 0.9)
+      if (d <= g.range) dps += ((g.damage * g.mag) / (g.mag * g.cooldown + g.reload)) * gunAcc
     }
-    if (has("laser") && d <= W.laser.range) dps += W.laser.damage / (W.laser.charge + W.laser.cooldown)
+    if (has("laser") && d <= W.laser.range) dps += (W.laser.damage / (W.laser.charge + W.laser.cooldown)) * beamAcc
     if (has("lightning") && d <= W.lightning.range) dps += (W.lightning.damage / W.lightning.cooldown) * 0.85
     if (has("mortar") && d > 12 && d < 200) dps += 40
     return dps * cm
@@ -693,28 +1123,37 @@ export class Brain {
    */
   private coverReason(primary: Enemy, threats: Enemy[], hpFrac: number, weaponsDown: boolean, recent: boolean): string {
     const t = this.t
+    // (a house bot's beam from beyond 110 m misses nine times in ten: not worth breaking off our own fire for)
+    const far = this.far()
     for (const e of threats) {
       if (e.tr.chargeT < 0 || t - e.tr.t > 0.15 || t - e.tr.chargeT < 0.1) continue
+      if (far && e.d > 110) continue
       if (e.seesMe ? Math.abs(wrap(e.tr.aimYaw - (e.yaw + Math.PI))) < 0.3 : e === primary) return "laser"
     }
-    if (weaponsDown) return "reload"
+    if (weaponsDown && !(far && primary.d > 110)) return "reload"
     let nearest = Infinity
     for (const e of threats) nearest = Math.min(nearest, e.d)
+    // (standing off we take little: keep shooting until half health before breaking off to mend)
     if (this.healing) {
       if (hpFrac >= 0.9 || nearest < 45) this.healing = false
-    } else if (hpFrac < 0.65 && nearest > 75) this.healing = true
+    } else if (hpFrac < (far ? 0.5 : 0.65) && nearest > 75) this.healing = true
     if (this.healing || (hpFrac <= 0.55 && !recent)) return "heal"
     const mine = this.myDpsAt(primary, primary.d)
     const theirs = this.theirDpsAt(primary, primary.d)
+    // (also when our edge is a lightning gun, useless until 45 m, and they are walking into it)
+    // (not against house bots: there we never want them close, lightning or no lightning)
+    const zapper = !far && this.light >= 0 && this.me.energy > 30 && primary.closing > 2
     if (this.ambush) {
-      if (primary.d < 45 || mine >= theirs) this.ambush = false
-    } else if (primary.d > 60 && mine < theirs * 0.9) this.ambush = true
+      if (primary.d < 45 || (mine >= theirs && !zapper)) this.ambush = false
+    } else if (primary.d > 60 && (mine < theirs * 0.75 || zapper)) this.ambush = true
     return this.ambush ? "ambush" : ""
   }
 
   /** The supply drop worth walking to now, if any: 3 cubes and a full repair for 4 s alone in its ring. */
   private dropPlan(zone: any, hpFrac: number): { x: number; y: number; r: number; lands: number; d: number; inRing: boolean } | null {
-    if (!TUNING.drops) return null
+    // Against house bots this is a switch we score separately. In a free-for-all a drop is where the
+    // strongest bots go (the best team on the feed took 5 in 2 matches), so only an unattended one.
+    if (!TUNING.drops && !this.ffa) return null
     const [mx, my] = this.me.pos as number[]
     let best: { x: number; y: number; r: number; lands: number; d: number; inRing: boolean } | null = null
     for (const dr of this.obs.drops ?? []) {
@@ -728,26 +1167,43 @@ export class Brain {
       let crowd = 0
       for (const tr of this.tracks.values()) if (!tr.npc && !tr.ghost && this.t - tr.t < 6 && hyp(tr.x - x, tr.y - y) < 60) crowd++
       if (crowd >= 2 || (crowd === 1 && hpFrac < 0.5 && d > r)) continue
+      if (this.ffa) {
+        let near = false
+        for (const tr of this.tracks.values()) if (!tr.npc && this.t - tr.t < 20 && hyp(tr.x - x, tr.y - y) < 220) near = true
+        if (near || this.nearFoes > 0) continue
+      }
       if (!best || d < best.d) best = { x, y, r, lands, d, inRing: d <= r - 1 }
     }
     return best
+  }
+
+  /** Playing the long-range game: against house bots, which is everything that is not a free-for-all. */
+  private far(): boolean {
+    return TUNING.standoff && !this.ffa
   }
 
   private prefRange(e: Enemy): number {
     const me = this.me
     const theyLaser = e.tr.weapons.includes("laser")
     const theyLight = e.tr.weapons.includes("lightning")
+    if (this.far()) return this.rangeNow
     if (this.light >= 0 && me.energy > 15) return 28
-    if (theyLight) return this.laser >= 0 ? 110 : 80
-    if (this.laser >= 0 && !theyLaser) return 100
+    if (theyLight) return this.laser >= 0 ? 110 : 90
+    if (this.laser >= 0 && !theyLaser) return 165 // the top bots' guns land 55% at 80-120 m, 40% at 120-160, 33% beyond
     if (theyLaser && this.laser < 0) return 40
-    return 60
+    return 95
   }
 
-  private flipStrafe(every: number) {
+  /**
+   * Which way we sidestep. Reversing takes 0.4 s at full acceleration, so flipping more often than
+   * that leaves us nearly standing still. Up close, where a bullet arrives before any change of
+   * direction can matter, speed is the only defence (a gun aimed at where we are misses a fast
+   * target): long sweeps. At range, a reversal about once a second also beats a gun that leads us.
+   */
+  private flipStrafe(d: number) {
     if (this.t >= this.strafeFlipT) {
       this.strafe = -this.strafe
-      this.strafeFlipT = this.t + every * (0.6 + this.rnd() * 0.9)
+      this.strafeFlipT = this.t + (d < 70 ? 1.6 + this.rnd() * 2.4 : 0.6 + this.rnd() * 0.6)
     }
   }
 
@@ -805,6 +1261,9 @@ export class Brain {
     const EP: boolean[] = []
     const EO: number[] = []
     const last = maxR >= 10 ? 32 : 16
+    // standing on a roof (or anything else off the walkable grid): move along the same level
+    const onRoof = w.bld[w.idx(mx, my)] === 1 && Math.abs(this.me.pos[2] - w.surface(mx, my)) < 1.5
+    let open = 0
     for (let k = -1; k < last; k++) {
       let cx = mx
       let cy = my
@@ -813,7 +1272,8 @@ export class Brain {
         const r = k < 16 ? 5 : 10
         cx = mx + Math.cos(ang) * r
         cy = my + Math.sin(ang) * r
-        if (!this.nav.lineWalkable(mx, my, cx, cy, 0.3)) continue
+        if (onRoof ? !this.levelLine(mx, my, cx, cy) : !this.nav.lineWalkable(mx, my, cx, cy, 0.3)) continue
+        if ((cx - mx) * perpX + (cy - my) * perpY > 3) open++
       }
       const cz = w.surface(cx, cy)
       let expP = false
@@ -828,8 +1288,32 @@ export class Brain {
       EP.push(expP)
       EO.push(expO)
     }
+    // nowhere to go the way we were sidestepping: turn round now
+    if (mode === "fight" && open === 0) this.strafeFlipT = 0
     const laserFoe = primary.tr.weapons.includes("laser")
     const ring = this.ring
+    const far = this.far()
+    const rm = hyp(mx - zone.cx, my - zone.cy)
+    const orbit = far && mode === "fight" && zone.cr > 150 && rm > 0.65 * zone.cr
+    let orbX = 0
+    let orbY = 0
+    if (orbit) {
+      if (this.t > this.orbitT) {
+        // the way round that leads away from the nearest of them
+        let nx = primary.x
+        let ny = primary.y
+        let nd = primary.d
+        for (const e of threats) if (e.d < nd) ((nd = e.d), (nx = e.x), (ny = e.y))
+        const tx = -(my - zone.cy) / rm
+        const ty = (mx - zone.cx) / rm
+        this.orbitDir = tx * (mx - nx) + ty * (my - ny) >= 0 ? 1 : -1
+        this.orbitT = this.t + 8
+      }
+      orbX = (-(my - zone.cy) / rm) * this.orbitDir
+      orbY = ((mx - zone.cx) / rm) * this.orbitDir
+    }
+    const NEAR: number[] = []
+    let bestI = 0
     let best: { x: number; y: number; hidden: boolean } | null = null
     let bestS = -Infinity
     for (let i = 0; i < X.length; i++) {
@@ -840,8 +1324,22 @@ export class Brain {
       if (mode === "fight") {
         if (EP[i]) s += 3
         s -= 2 * EO[i]
-        s -= Math.abs(dP - pref) / 10
-        s += (1.5 * ((cx - mx) * perpX + (cy - my) * perpY)) / 10
+        const band = Math.min(20, pref * 0.3)
+        let near = dP
+        if (far) for (const e of threats) near = Math.min(near, hyp(e.x - cx, e.y - cy))
+        NEAR[i] = near
+        // standing off: every metre the nearest of them gains on us counts, more than a sidestep does
+        if (far && near < pref - band) s -= (pref - band - near) / 3
+        else s -= Math.max(0, Math.abs(dP - pref) - band) / 10
+        // (sidestepping: against house bots sideways speed made no difference to how often they hit,
+        // and it eats the speed we need to keep the range)
+        s += ((far && !this.mortarFoe ? 0.3 : 1.5) * ((cx - mx) * perpX + (cy - my) * perpY)) / 10
+        if (far) {
+          // Room: a step toward the edge of the circle is worth less the nearer the edge is, and
+          // close to it the way to keep a distance is round, not out. One way round, kept.
+          s -= Math.max(0, hyp(cx - zone.cx, cy - zone.cy) - 0.6 * zone.cr) / 6
+          if (orbit) s += (2.2 * ((cx - mx) * orbX + (cy - my) * orbY)) / 10
+        }
         // a step from cover: somewhere to go when their laser charges or our magazine runs dry
         let cover = false
         for (let j = 0; !cover && j < X.length; j++) if (!EP[j] && EO[j] === 0 && hyp(X[j] - cx, Y[j] - cy) <= 6.2) cover = true
@@ -858,10 +1356,80 @@ export class Brain {
       if (ring && hyp(cx - ring.x, cy - ring.y) > ring.r - 1.5) s -= 5
       if (s > bestS) {
         bestS = s
+        bestI = i
         best = { x: cx, y: cy, hidden: !EP[i] && EO[i] === 0 }
       }
     }
+    // how much room the chosen step puts between us and the nearest of them (the first candidate is "stay")
+    this.kiteGain = mode === "fight" && X.length ? (NEAR[bestI] ?? 0) - (NEAR[0] ?? 0) : 0
     return best
+  }
+
+  /**
+   * Free-for-all: the standable spot inside the zone that is farthest from every mech we have seen
+   * lately, preferring ones out of their sight and not too long a walk. Null when where we stand is
+   * already about as good as it gets.
+   */
+  private safeSpot(zone: any): { x: number; y: number } | null {
+    const t = this.t
+    if (this.safe && t < this.safe.until) return this.safe.stay ? null : this.safe
+    const [mx, my] = this.me.pos as number[]
+    const w = this.w
+    const foes: { x: number; y: number; fresh: boolean; mz: number }[] = []
+    for (const tr of this.tracks.values()) {
+      if (tr.npc || t - tr.t > 25) continue
+      const lead = Math.min(t - tr.t, 1)
+      foes.push({ x: tr.x + tr.vx * lead, y: tr.y + tr.vy * lead, fresh: !tr.ghost && t - tr.t <= 5, mz: tr.z + this.cfg.mech.muzzle_height })
+    }
+    for (const d of this.obs.drops ?? []) if ((d.lands_in ?? 0) < 30) foes.push({ x: d.pos[0], y: d.pos[1], fresh: false, mz: 0 })
+    if (!foes.length) return null
+    const score = (x: number, y: number) => {
+      let near = 280
+      for (const f of foes) near = Math.min(near, hyp(f.x - x, f.y - y))
+      let s = near - 0.35 * hyp(x - mx, y - my)
+      const cz = w.surface(x, y)
+      let seen = false
+      for (const f of foes) if (f.fresh && hyp(f.x - x, f.y - y) < 260 && w.los(f.x, f.y, f.mz, x, y, cz + this.H * 0.6)) seen = true
+      if (!seen) s += 70
+      return s
+    }
+    const stay = score(mx, my)
+    let best: { x: number; y: number } | null = null
+    let bs = stay + 25 // only worth moving for a clear gain
+    for (const r of [25, 50, 80, 120, 170, 230])
+      for (let k = 0; k < 16; k++) {
+        const x = mx + Math.cos((k * TAU) / 16) * r
+        const y = my + Math.sin((k * TAU) / 16) * r
+        if (!this.nav.free(x, y, 1) || !this.nav.inMain(x, y)) continue
+        if (hyp(x - zone.cx, y - zone.cy) > zone.cr - 20 || !this.zoneOk(zone, x, y)) continue
+        const sc = score(x, y)
+        if (sc > bs) {
+          bs = sc
+          best = { x, y }
+        }
+      }
+    this.safe = best ? { ...best, until: t + 2.5, stay: false } : { x: mx, y: my, until: t + 1.5, stay: true }
+    return best
+  }
+
+  /** A straight walk that stays on one level: no step over STEP_UP either way (so it never leaves a roof). */
+  private levelLine(x0: number, y0: number, x1: number, y1: number): boolean {
+    const w = this.w
+    const dx = x1 - x0
+    const dy = y1 - y0
+    const n = Math.max(1, Math.ceil(hyp(dx, dy)))
+    let prev = this.me.pos[2] as number
+    for (let k = 1; k <= n; k++) {
+      const x = x0 + (dx * k) / n
+      const y = y0 + (dy * k) / n
+      if (!w.inGrid(x, y)) return false
+      const sf = w.surface(x, y)
+      if (Math.abs(sf - prev) > STEP_UP) return false
+      prev = sf
+    }
+    // keep the whole footprint on the roof at the far end
+    for (let q = 0; q < 8; q++) if (Math.abs(w.surface(x1 + Math.cos(q * 0.7854) * this.R, y1 + Math.sin(q * 0.7854) * this.R) - prev) > STEP_UP) return false
+    return true
   }
 
   /**
@@ -917,7 +1485,7 @@ export class Brain {
   /** Can we walk to it? With `roofOk`, also: is it on a roof low enough to jet onto from walkable ground? */
   private reachable(e: Item, roofOk = false): boolean {
     const h = e.z - this.w.ground(e.x, e.y)
-    if (h < 2.5) return this.nav.snap(e.x, e.y, 2) >= 0
+    if (h < 2.5) return this.nav.snap(e.x, e.y, 3) >= 0
     if (!roofOk || h > 40) return false
     return Math.abs(e.z - this.w.surface(e.x, e.y)) < 2 && this.nav.snap(e.x, e.y, 25) >= 0
   }
@@ -926,18 +1494,23 @@ export class Brain {
     const me = this.me
     const [mx, my, mz] = me.pos as number[]
     const t = this.t
+    const quiet = true
     // 1. a second weapon
-    if (me.weapons.some((x: any) => !x)) {
+    // (the laser is the one that kills at range: go and trade a lightning gun for one seen nearby)
+    const empty = me.weapons.some((x: any) => !x)
+    if (quiet && (empty || this.laser < 0)) {
       let best: Item | null = null
       let bestS = Infinity
       for (const p of this.pickups.values()) {
         const rank = WANT.indexOf(p.kind)
-        if (rank < 0 || this.ignore.has(p.id)) continue
+        if (rank < 0 || this.ignore.has(p.id) || (!empty && rank > 0)) continue
         const d = hyp(p.x - mx, p.y - my)
-        if (d > 260 || !this.reachable(p, true) || !this.zoneOk(zone, p.x, p.y)) continue
+        if (d > (empty ? 260 : 150) || !this.reachable(p, true) || !this.zoneOk(zone, p.x, p.y)) continue
         // a roof costs a climb (energy and time): worth about 70 m of walking
         const roof = p.z - this.w.ground(p.x, p.y) >= 2.5
-        const s = d + rank * 40 + (roof ? 70 : 0)
+        // (a laser is worth a long walk: at the range we fight from it is two thirds of our damage,
+        // and a lightning gun none of it)
+        const s = d + rank * 140 + (roof ? 70 : 0)
         if (s < bestS) {
           bestS = s
           best = p
@@ -945,10 +1518,13 @@ export class Brain {
       }
       if (best) return { x: best.x, y: best.y, stop: 1.5, boost: me.energy > 30 && best.z - this.w.ground(best.x, best.y) < 2.5, kind: "weapon" }
     }
-    // 2. cubes lying around
-    if ((me.cubes ?? 0) < CUBE_TARGET) {
+    // 2. cubes lying around (more of them in a free-for-all: every fifth or so is another upgrade,
+    // and against lasers, which never miss, being a bigger target costs little)
+    const cubeGoal = CUBE_TARGET
+    if (quiet && (me.cubes ?? 0) < cubeGoal) {
       let best: Item | null = null
-      let bd = 80
+      // (against house bots a kill made from 170 m leaves its cubes, all of theirs plus two, that far away)
+      let bd = this.far() && !this.wary ? 230 : 80
       for (const c of this.cubes.values()) {
         const d = hyp(c.x - mx, c.y - my)
         if (d < bd && this.reachable(c) && this.zoneOk(zone, c.x, c.y)) {
@@ -958,10 +1534,17 @@ export class Brain {
       }
       if (best) return { x: best.x, y: best.y, stop: 0.5, boost: false, kind: "cube" }
     }
-    // 3. crates, when healthy enough that shooting does not cost us healing
-    if (hpFrac >= 0.75 && (me.cubes ?? 0) < CUBE_TARGET) {
+    // 3. Against house bots the clock is theirs (the whole squad comes late on, grown): with nobody
+    // in sight, healthy and armed, go to where one was last seen rather than wait for it. A kill is a
+    // point and at least two cubes, so this comes before crates.
+    if (this.far() && !this.wary && hpFrac >= 0.7 && (this.laser >= 0 || (me.cubes ?? 0) >= 4)) {
+      const q = this.quarry(zone)
+      if (q) return { x: q.x, y: q.y, stop: STANDOFF - 10, boost: false, kind: "seek" }
+    }
+    // 4. crates, when healthy enough that shooting does not cost us healing
+    if (hpFrac >= 0.75 && (me.cubes ?? 0) < cubeGoal && (!this.wary || this.nearFoes === 0)) {
       let best: Item | null = null
-      let bd = 220
+      let bd = this.wary ? 120 : 220
       for (const c of this.crates.values()) {
         const d = hyp(c.x - mx, c.y - my)
         if (d < bd && this.reachable(c) && this.zoneOk(zone, c.x, c.y)) {
@@ -974,8 +1557,19 @@ export class Brain {
         return { x: best.x, y: best.y, stop: clear ? 20 : 3, boost: false, kind: "crate" }
       }
     }
-    // 4. nothing known: get inside the next circle, then wander it looking for loot
+    // 5. nothing known: get inside the next circle, then wander it looking for loot
     if (hyp(mx - zone.nx, my - zone.ny) > zone.inner + 5) return { x: zone.gx, y: zone.gy, stop: 3, boost: false, kind: "rotate" }
+    // free-for-all: with someone within earshot of our footsteps' range of interest, stand still
+    // (silent) and watch; otherwise go looking for loot (cubes are health for the end)
+    if (this.wary && this.nearFoes > 0) return { x: mx, y: my, stop: 5, boost: false, kind: "post" }
+    // (with nothing known to go after: an open look-out, below)
+    // Nothing left to gain by walking about (both slots full and all the cubes we want), or the
+    // circle is small enough that everyone left is near: pick a spot few places can see, go there
+    // and stand still. A mech pacing the middle of the last circles is seen and heard by all.
+    if (zone.nr <= 70 || ((me.cubes ?? 0) >= cubeGoal && !me.weapons.some((x: any) => !x))) {
+      const p = this.postSpot(zone)
+      if (p) return { x: p.x, y: p.y, stop: 2.5, boost: false, kind: "post" }
+    }
     if (!this.explore || t > this.explore.until || hyp(this.explore.x - mx, this.explore.y - my) < 6 || hyp(this.explore.x - zone.nx, this.explore.y - zone.ny) > zone.inner + 5) {
       this.explore = null
       for (let k = 0; k < 12 && !this.explore; k++) {
@@ -988,6 +1582,174 @@ export class Brain {
     }
     if (this.explore) return { x: this.explore.x, y: this.explore.y, stop: 4, boost: false, kind: "explore" }
     return { x: zone.gx, y: zone.gy, stop: 3, boost: false, kind: "rotate" }
+  }
+
+  /**
+   * Where to retreat to against house bots: a walkable spot within 130 m that is far from every one
+   * of them, keeps a line of fire on the one we are shooting, leaves room inside the circle, and is
+   * not reached by walking toward any of them. Null when nowhere is better than here.
+   */
+  private kiteSpot(primary: Enemy, threats: Enemy[], zone: any): { x: number; y: number } | null {
+    const t = this.t
+    const [mx, my] = this.me.pos as number[]
+    const w = this.w
+    const nav = this.nav
+    const all = threats.includes(primary) ? threats : [primary, ...threats]
+    const k0 = this.kite
+    if (k0 && t < k0.until && hyp(k0.x - mx, k0.y - my) > 6) {
+      // keep going while it still leads away from the nearest of them
+      let ok = true
+      for (const e of all) if (hyp(e.x - k0.x, e.y - k0.y) < e.d - 5) ok = false
+      if (ok) return k0
+    }
+    const score = (x: number, y: number, walk: number) => {
+      let near = 260
+      for (const e of all) near = Math.min(near, hyp(e.x - x, e.y - y) - Math.max(0, e.closing) * (walk / 10))
+      let sc = near - 0.45 * walk
+      const cz = w.surface(x, y)
+      if (w.los(x, y, cz + this.muzH, primary.x, primary.y, primary.cz)) sc += all.length <= 1 ? 60 : 40
+      sc -= Math.max(0, hyp(x - zone.cx, y - zone.cy) - 0.7 * zone.cr) * 0.8
+      return sc
+    }
+    let best: { x: number; y: number } | null = null
+    // staying, priced the same way: where they will be three seconds from now
+    let bs = score(mx, my, 30) + 0.45 * 30 + 6
+    const phase = this.rnd() * 0.39
+    for (const r of [30, 60, 95, 130])
+      for (let k = 0; k < 16; k++) {
+        const x = mx + Math.cos((k * TAU) / 16 + phase) * r
+        const y = my + Math.sin((k * TAU) / 16 + phase) * r
+        if (!nav.free(x, y, 1) || !nav.inMain(x, y)) continue
+        if (hyp(x - zone.cx, y - zone.cy) > zone.cr - 20 || !this.zoneOk(zone, x, y)) continue
+        // not by way of them: the first third of the straight line must not close on anyone
+        let toward = false
+        for (const e of all) if (hyp(e.x - (mx + (x - mx) / 3), e.y - (my + (y - my) / 3)) < e.d - 3) toward = true
+        if (toward) continue
+        // a spot behind a long detour is not 60 m away: charge the straight line when it is walkable, half again when not
+        const sc = score(x, y, nav.lineWalkable(mx, my, x, y, 1) ? r : r * 1.6)
+        if (sc > bs) {
+          bs = sc
+          best = { x, y }
+        }
+      }
+    this.kite = best ? { ...best, until: t + 2.5 } : null
+    return this.kite
+  }
+
+  /** A laser on the ground within `maxD` that we can walk to. */
+  private laserNear(zone: any, maxD: number): Goal | null {
+    const [mx, my] = this.me.pos as number[]
+    let best: Item | null = null
+    let bd = maxD
+    for (const p of this.pickups.values()) {
+      if (p.kind !== "laser" || this.ignore.has(p.id)) continue
+      const d = hyp(p.x - mx, p.y - my)
+      if (d < bd && this.reachable(p) && this.zoneOk(zone, p.x, p.y)) {
+        bd = d
+        best = p
+      }
+    }
+    return best ? { x: best.x, y: best.y, stop: 1.5, boost: this.me.energy > 30, kind: "weapon" } : null
+  }
+
+  /** Where the nearest mech we know of was last seen (or, failing that, where gunfire was heard). */
+  private quarry(zone: any): { x: number; y: number } | null {
+    const t = this.t
+    const [mx, my, mz] = this.me.pos as number[]
+    let best: { x: number; y: number } | null = null
+    let bd = 480
+    for (const [id, q] of this.lastSeen) {
+      if (t - q.t > 50) {
+        this.lastSeen.delete(id)
+        continue
+      }
+      const d = hyp(q.x - mx, q.y - my)
+      // lost a moment ago and near: it is on its way to us (they share vision). Let it come.
+      if (t - q.t < 15 && d < 260) continue
+      // we are looking at the place and nobody is there: gone
+      if (t - q.t > 3 && d < 190 && this.w.los(mx, my, mz + this.eyeH, q.x, q.y, q.z + 4.5)) {
+        this.lastSeen.delete(id)
+        continue
+      }
+      if (d < bd && this.zoneOk(zone, q.x, q.y)) {
+        bd = d
+        best = q
+      }
+    }
+    if (best) return best
+    if (t - this.farHeardT < 12) {
+      const x = mx + Math.cos(this.farHeardYaw) * 150
+      const y = my + Math.sin(this.farHeardYaw) * 150
+      if (this.w.inGrid(x, y) && this.zoneOk(zone, x, y) && this.nav.snap(x, y, 30) >= 0) return { x, y }
+    }
+    return null
+  }
+
+  /** Leave for the spot farthest from everyone we know of, out of their sight if there is one. */
+  private runOff(zone: any): Move | null {
+    const sp = this.safeSpot(zone)
+    return sp ? this.travel({ x: sp.x, y: sp.y, stop: 4, boost: this.me.energy > 20, kind: "away" }) : null
+  }
+
+  /**
+   * Where to wait when there is nothing to fetch. In a free-for-all: a standable spot inside the next
+   * circle's inner disk with walls on as many sides as possible. Against house bots the opposite:
+   * the most open one, so that whoever comes is seen, and shot at, from as far away as possible.
+   */
+  private postSpot(zone: any): { x: number; y: number } | null {
+    const t = this.t
+    const [mx, my] = this.me.pos as number[]
+    const lim = Math.max(6, zone.inner)
+    const ok = (x: number, y: number) => hyp(x - zone.nx, y - zone.ny) <= lim && this.zoneOk(zone, x, y)
+    if (this.post && t < this.post.until && this.post.key === this.zoneKey && ok(this.post.x, this.post.y)) return this.post
+    // Against house bots a post is held for 20 s; with nobody come by then, the next one is somewhere
+    // else, toward the last gunfire we heard: a round of look-outs rather than one.
+    const old = this.far() && this.post && this.post.key === this.zoneKey ? this.post : null
+    const w = this.w
+    const nav = this.nav
+    const eye = this.eyeH
+    const open = this.far()
+    const walls = (x: number, y: number) => {
+      const z = w.ground(x, y) + eye
+      let n = 0
+      for (let k = 0; k < 16; k++) {
+        const cx = Math.cos((k * TAU) / 16)
+        const cy = Math.sin((k * TAU) / 16)
+        if (open) {
+          // how far we can see that way, in quarters of sight range
+          for (const r of [50, 100, 150, 200]) {
+            if (!w.los(x, y, z, x + cx * r, y + cy * r, w.ground(x + cx * r, y + cy * r) + eye * 0.6)) break
+            n += 0.25
+          }
+        } else if (!w.los(x, y, z, x + cx * 60, y + cy * 60, w.ground(x + cx * 60, y + cy * 60) + eye * 0.6)) n++
+      }
+      return n
+    }
+    // around us while the circle is large, around its centre once it is small
+    const far = Math.min(lim, 110)
+    const ox = zone.nr <= 140 ? zone.nx : mx
+    const oy = zone.nr <= 140 ? zone.ny : my
+    let best: { x: number; y: number } | null = null
+    let bs = -Infinity
+    for (let k = 0; k < 56; k++) {
+      const ang = this.rnd() * TAU
+      const r = Math.sqrt(this.rnd()) * far
+      const x = k === 0 ? mx : ox + Math.cos(ang) * r
+      const y = k === 0 ? my : oy + Math.sin(ang) * r
+      if (!ok(x, y) || !nav.free(x, y, 1) || !nav.inMain(x, y)) continue
+      // a wall on each side is worth 25 m of walking; late on, nearer the centre is where the circle goes
+      let sc = walls(x, y) - hyp(x - mx, y - my) / 25 - (zone.nr <= 140 ? (hyp(x - zone.nx, y - zone.ny) / Math.max(10, zone.nr)) * 4 : 0) + (k === 0 && !old ? 1.5 : 0)
+      if (old && hyp(x - old.x, y - old.y) < 60) sc -= 4
+      // (not where the one we just lost sight of will come out)
+      if (open) for (const q of this.lastSeen.values()) if (t - q.t < 15) sc -= Math.max(0, 150 - hyp(x - q.x, y - q.y)) / 20
+      if (open && t - this.farHeardT < 20 && hyp(x - mx, y - my) > 20) sc += 2 * Math.cos(wrap(Math.atan2(y - my, x - mx) - this.farHeardYaw))
+      if (sc > bs) {
+        bs = sc
+        best = { x, y }
+      }
+    }
+    this.post = best ? { ...best, until: t + (open ? 20 + hyp(best.x - mx, best.y - my) / 9 : 45), key: this.zoneKey } : null
+    return this.post
   }
 
   /** Walk to a goal: straight if the way is clear, along an A* path otherwise, hopping walls off the grid. */
@@ -1004,7 +1766,10 @@ export class Brain {
       if (!me.grounded && this.hop) return this.direct(this.hop.x, this.hop.y, g.kind === "zone")
       let tx = g.x
       let ty = g.y
-      if (nav.snap(g.x, g.y, 3) >= 0) {
+      // Keep going toward the goal over whatever we are standing on. Only when something a jet
+      // cannot climb stands in that direction do we make for the nearest walkable ground instead
+      // (which may be back the way we came).
+      if (nav.snap(g.x, g.y, 3) >= 0 && !this.canHop(g.x, g.y, 70)) {
         const c = nav.snap(mx, my, 60)
         if (c >= 0) {
           tx = nav.cx(c)
@@ -1018,19 +1783,85 @@ export class Brain {
     const boost = g.boost && me.energy > 5
     // margin 1 m: with the grid's rounding that keeps the real wall at least a radius away, so we never scrape
     if (dGoal < 150 && nav.lineWalkable(mx, my, g.x, g.y, 1)) return { x: (g.x - mx) / dGoal, y: (g.y - my) / dGoal, boost, jump: false }
-    if (!this.path || hyp(g.x - this.pathGX, g.y - this.pathGY) > 4 || this.t - this.pathT > 2) {
-      this.path = nav.findPath(mx, my, g.x, g.y)
+    const zn = this.zoneNow
+    // Plan when the goal moves or the route is lost, not on a timer: two routes of nearly equal
+    // length would otherwise take turns and walk us back and forth.
+    // (also when the same spot turns from somewhere to stroll to into somewhere to be before the
+    // circle closes: only that kind of route is checked against the circle and for a way over the top)
+    if (!this.path || hyp(g.x - this.pathGX, g.y - this.pathGY) > 4 || this.pathLost || (g.kind === "zone") !== this.pathZone) {
+      this.pathLost = false
+      this.pathZone = g.kind === "zone"
+      // Outside ground costs extra only while we are inside (so we do not leave); once outside,
+      // everything around us is outside and the shortest way back in is what we want.
+      const keepIn = zn && zn.cr > 12 && hyp(mx - zn.cx, my - zn.cy) < zn.cr - 6
+      this.path = nav.findPath(mx, my, g.x, g.y, 18000, keepIn ? { x: zn.cx, y: zn.cy, r: zn.cr - 6, pen: 5 } : undefined)
       this.pathI = 0
       this.pathT = this.t
       this.pathGX = g.x
       this.pathGY = g.y
+      // Racing the zone: if the way round is long, or leaves the circle, and nothing taller than a
+      // jet can climb stands in the straight line, go over the top instead.
+      this.overTop = false
+      this.pathOut = 0
+      const q = this.path
+      const gc = nav.snap(g.x, g.y, 160)
+      this.pathPartial = !!q && q.length >= 2 && gc >= 0 && hyp(q[q.length - 2] - nav.cx(gc), q[q.length - 1] - nav.cy(gc)) > 3
+      if (g.kind === "zone" && q && q.length >= 4 && zn) {
+        let len = 0
+        let leaves = false
+        for (let k = 2; k < q.length; k += 2) {
+          const seg = hyp(q[k] - q[k - 2], q[k + 1] - q[k - 1])
+          len += seg
+          // (a path that only touches the edge counts: the hop off its far end, our own width and
+          // a tick of delay are each worth a couple of metres)
+          if (hyp(q[k] - zn.cx, q[k + 1] - zn.cy) > zn.cr - Math.min(2, zn.cr * 0.1)) {
+            leaves = true
+            this.pathOut += seg
+          }
+        }
+        if (dGoal < 160 && this.t > this.noHopUntil && (len > 1.5 * dGoal + 25 || (leaves && hyp(g.x - zn.cx, g.y - zn.cy) <= zn.cr)) && this.canHop(g.x, g.y)) this.overTop = true
+      }
+      // That exact point cannot be walked to without leaving the circle (or at all, within the
+      // search's budget), and not hopped to either. Any ground well inside the next circle will do:
+      // take the shortest walk that reaches some, and wait there.
+      this.pathAlt = false
+      if (g.kind === "zone" && zn && q && !this.overTop && (this.pathOut > 0 || this.pathPartial)) {
+        const rr = zn.nr - clamp(zn.nr * 0.25, 4, 15)
+        if (rr > 3 && hyp(mx - zn.nx, my - zn.ny) > rr) {
+          const alt = nav.findPath(mx, my, zn.nx, zn.ny, 18000, keepIn ? { x: zn.cx, y: zn.cy, r: zn.cr - 6, pen: 5 } : undefined, rr)
+          if (alt && alt.length >= 4) {
+            let out = 0
+            for (let k = 2; k < alt.length; k += 2) if (hyp(alt[k] - zn.cx, alt[k + 1] - zn.cy) > zn.cr - Math.min(2, zn.cr * 0.1)) out += hyp(alt[k] - alt[k - 2], alt[k + 1] - alt[k - 1])
+            const reached = hyp(alt[alt.length - 2] - zn.nx, alt[alt.length - 1] - zn.ny) <= rr + 2
+            if (reached && (this.pathPartial || out < this.pathOut - 1)) {
+              this.path = alt
+              this.pathOut = out
+              this.pathPartial = false
+              this.pathAlt = true
+            }
+          }
+        }
+      }
+    }
+    // A walk that leaves the circle was the best there was from where we planned it. Further along,
+    // the straight line over the roofs may have opened up: look again every half second.
+    if (g.kind === "zone" && this.pathOut > 0 && !this.overTop && !this.pathAlt && this.t > this.noHopUntil && this.t - this.hopLookT > 0.45) {
+      this.hopLookT = this.t
+      if (dGoal < 160 && zn && hyp(mx - zn.cx, my - zn.cy) <= zn.cr && this.canHop(g.x, g.y)) this.overTop = true
+    }
+    if (this.overTop && g.kind === "zone" && this.t > this.noHopUntil) {
+      this.hop = { x: g.x, y: g.y }
+      return this.direct(g.x, g.y, true)
     }
     const p = this.path
     if (!p || p.length < 2) return this.direct(g.x, g.y, g.kind === "zone")
     const n = p.length / 2
     const ex = p[2 * n - 2]
     const ey = p[2 * n - 1]
-    if (hyp(ex - mx, ey - my) < 5) {
+    // a long route can come back unfinished (the search has a budget): plan the rest before we run out of it
+    if (this.pathPartial && hyp(ex - mx, ey - my) < 30 && this.t - this.pathT > 0.5) this.pathLost = true
+    if (hyp(ex - mx, ey - my) < 5 && !this.pathPartial) {
+      if (this.pathAlt) return { x: 0, y: 0, boost: false, jump: false } // as far in as walking gets us
       // end of the walkable path but not at the goal: the goal is off the grid (roof, pit)
       if (hyp(g.x - ex, g.y - ey) > Math.max(3, g.stop)) {
         this.hop = { x: g.x, y: g.y }
@@ -1039,7 +1870,26 @@ export class Brain {
       return { x: (g.x - mx) / dGoal, y: (g.y - my) / dGoal, boost, jump: false }
     }
     let k = Math.min(n - 1, this.pathI + 16)
+    // The walking route leaves a circle that hurts. Costing a quarter of our health while we are
+    // already inside the next circle: this is the place to stay. Costing all of it: go as far along
+    // it as stays inside and wait (alive a little longer, and a way over the roofs may yet open).
+    // Anything in between we walk now: the circle only closes, and the way round only gets longer.
+    if (g.kind === "zone" && zn && this.pathOut > 0 && hyp(mx - zn.cx, my - zn.cy) <= zn.cr - 1) {
+      const cost = (this.pathOut / 10) * zn.dps
+      if (cost > 0.25 * me.hp && hyp(mx - zn.nx, my - zn.ny) <= zn.nr - clamp(zn.nr * 0.25, 4, 15)) return { x: 0, y: 0, boost: false, jump: false }
+      if (cost > 0.9 * me.hp) {
+        let lastIn = this.pathI
+        while (lastIn + 1 < n && hyp(p[2 * lastIn + 2] - zn.cx, p[2 * lastIn + 3] - zn.cy) <= zn.cr - 3) lastIn++
+        if (lastIn < n - 1) {
+          if (hyp(p[2 * lastIn] - zn.cx, p[2 * lastIn + 1] - zn.cy) > zn.cr - 3) return { x: 0, y: 0, boost: false, jump: false }
+          k = Math.min(k, lastIn)
+          if (hyp(p[2 * k] - mx, p[2 * k + 1] - my) < 2) return { x: 0, y: 0, boost: false, jump: false }
+        }
+      }
+    }
     for (; k > this.pathI; k--) if (nav.lineWalkable(mx, my, p[2 * k], p[2 * k + 1], 1)) break
+    // drifted off the route (a fight, a shove): nothing on it is reachable in a straight line any more
+    if (k === this.pathI && this.t - this.pathT > 0.7 && hyp(p[2 * k] - mx, p[2 * k + 1] - my) > 6 && !nav.lineWalkable(mx, my, p[2 * k], p[2 * k + 1], 0.3)) this.pathLost = true
     this.pathI = k
     const tx = p[2 * k]
     const ty = p[2 * k + 1]
@@ -1051,6 +1901,28 @@ export class Brain {
     return d > 1e-6 ? { x: (tx - mx) / d, y: (ty - my) / d, boost, jump: false } : { x: 0, y: 0, boost: false, jump: false }
   }
 
+  /** The straight line to a point crosses only walls a jet can climb (and does not leave the map). */
+  private canHop(tx: number, ty: number, maxLen = 1e9): boolean {
+    const w = this.w
+    const [mx, my, mz] = this.me.pos as number[]
+    const d = hyp(tx - mx, ty - my)
+    if (d < 4) return true
+    let cur = mz
+    let climb = 0
+    for (let s = 1; s <= Math.min(d, maxLen); s += 1) {
+      const x = mx + ((tx - mx) * s) / d
+      const y = my + ((ty - my) * s) / d
+      if (!w.inGrid(x, y) || x < w.bMinX || x > w.bMaxX || y < w.bMinY || y > w.bMaxY) return false
+      const sf = w.over(x, y) // a bridge is crossed over its deck
+      if (sf - cur > STEP_UP) {
+        if (sf - cur > 35) return false
+        climb += sf - cur
+      }
+      cur = sf
+    }
+    return climb <= 70
+  }
+
   /** Straight at a point, jumping and jetting over whatever wall is in the way. */
   private direct(tx: number, ty: number, urgent: boolean): Move {
     const me = this.me
@@ -1060,46 +1932,60 @@ export class Brain {
     if (d < 0.5) return { x: 0, y: 0, boost: false, jump: false }
     const ux = (tx - mx) / d
     const uy = (ty - my) / d
-    // The first wall on the way: a rise of more than one step between consecutive metres. A slope,
-    // however long, is walked. `need` is the height our feet must reach to get over it.
+    // The first wall on the way: a rise of more than one step between consecutive metres, anywhere
+    // across our width. A slope, however long, is walked. `need` is the height our feet must reach.
     const look = Math.min(d + this.R, this.R + 9)
-    let cur = mz
     let wallAt = -1
     let need = -Infinity
-    for (let s = 1; s <= look; s += 1) {
-      const sf = w.surface(mx + ux * s, my + uy * s)
-      if (sf - cur > STEP_UP) {
-        wallAt = s
-        for (let q = s; q <= s + 2 * this.R + 2; q += 1) need = Math.max(need, w.surface(mx + ux * q, my + uy * q))
-        break
+    for (const o of [0, 0.9, -0.9]) {
+      const sx = mx - uy * this.R * o
+      const sy = my + ux * this.R * o
+      let cur = Math.max(mz, o === 0 ? -Infinity : w.over(sx, sy))
+      for (let q = 1; q <= look; q += 1) {
+        const sf = w.over(sx + ux * q, sy + uy * q)
+        if (sf - cur > STEP_UP) {
+          if (wallAt < 0 || q < wallAt) wallAt = q
+          for (let e = q; e <= q + 2 * this.R + 2; e += 1) need = Math.max(need, w.over(sx + ux * e, sy + uy * e))
+          break
+        }
+        cur = me.grounded ? sf : Math.max(sf, mz)
       }
-      cur = me.grounded ? sf : Math.max(sf, mz)
+    }
+    if (!me.grounded) {
+      let boost = wallAt >= 0 && wallAt <= this.R + 5 && mz < need + 1.5
+      // Level with the top is not over it: a wide mech that stops its jets there drops back before
+      // its middle has crossed the edge. Hold height while something taller than what is under our
+      // middle still lies under our leading half.
+      const here = w.over(mx, my)
+      let ahead = -Infinity
+      for (const o of [0, 0.9, -0.9]) for (let q = 1; q <= this.R + 2; q += 1) ahead = Math.max(ahead, w.over(mx - uy * this.R * o + ux * q, my + ux * this.R * o + uy * q))
+      if (ahead > here + STEP_UP && mz < ahead + 0.8 && ahead - mz < 36) boost = true
+      return { x: ux, y: uy, boost: boost && me.energy > 0.5, jump: false }
     }
     if (wallAt < 0 || wallAt > this.R + 5) return { x: ux, y: uy, boost: false, jump: false }
-    if (!me.grounded) return { x: ux, y: uy, boost: me.energy > 0.5 && mz < need + 1.5, jump: false }
     // On the ground at the foot of it: only start a climb we have the energy to finish.
     const rise = need - mz
     const maxE = me.max_energy ?? 100
-    const cost = ((rise + 3) / 8.9) * (me.stats?.jet_drain ?? 15) + 8
+    // (the climb, plus staying up while our whole width crosses the edge: a bigger mech needs longer)
+    const cost = ((rise + 3) / 8.9 + (2 * this.R + 2) / 14) * (me.stats?.jet_drain ?? 15) + 3
     if (cost > maxE * 0.97) return { x: -uy, y: ux, boost: false, jump: false } // too tall: feel along it
     if (me.energy >= cost) return { x: ux, y: uy, boost: true, jump: true }
     return { x: 0, y: 0, boost: false, jump: false } // wait for the jets to recharge
   }
 
   private watchStuck(mv: Move, label: string) {
-    const [mx, my] = this.me.pos as number[]
+    const me = this.me
     const t = this.t
     this.label = label
     const travelling = !(label === "fight" || label === "duck" || label === "ghost" || label === "dodge" || label === "unstuck")
-    if (!travelling || hyp(mv.x, mv.y) <= 0.5 || !this.me.grounded) {
-      this.hist.length = 0
+    const speed = hyp(me.vel[0], me.vel[1])
+    if (!travelling || hyp(mv.x, mv.y) <= 0.5 || !me.grounded || speed > 1.5) {
+      this.slowT = -1
       return
     }
-    this.hist.push({ t, x: mx, y: my })
-    while (this.hist.length && this.hist[0].t < t - 1.3) this.hist.shift()
-    const h = this.hist[0]
-    if (t - h.t >= 1.2 && hyp(mx - h.x, my - h.y) < 0.8) {
-      // pushed against something for over a second: sidestep, jump, and plan again
+    if (this.slowT < 0) this.slowT = t
+    if (t - this.slowT >= 0.9) {
+      // pushing and going nowhere for most of a second: sidestep, jump, and plan again
       const side = this.rnd() < 0.5 ? 1 : -1
       const back = 0.4
       const ux = -mv.y * side - mv.x * back
@@ -1108,10 +1994,12 @@ export class Brain {
       this.unstuckX = ux / l
       this.unstuckY = uy / l
       this.unstuckT = t + 0.7
+      this.overTop = false
+      this.noHopUntil = t + 12 // going over the top got us wedged: walk for a while
       this.path = null
       this.cover = null
       this.explore = null
-      this.hist.length = 0
+      this.slowT = -1
       mv.jump = true
     }
   }
@@ -1155,7 +2043,7 @@ export class Brain {
     return Math.abs(wrap(me.aim[0] - sol.yaw)) <= yawTol && Math.abs(me.aim[1] - sol.pitch) <= pitchTol
   }
 
-  private aimAndFire(act: any, primary: Enemy | null, enemies: Enemy[], hpFrac: number, label: string): number[] {
+  private aimAndFire(act: any, primary: Enemy | null, enemies: Enemy[], hpFrac: number, label: string, holdFire: boolean): number[] {
     const me = this.me
     const cfg = this.cfg
     const t = this.t
@@ -1167,7 +2055,7 @@ export class Brain {
     let aim: number[] | null = null
 
     // lightning needs no aim beyond the cone: fire whenever a mech is inside it
-    if (tw && tw.cooldown <= 0.1 && me.energy >= (tw.stats.energy ?? 3) + 1) {
+    if (!holdFire && tw && tw.cooldown <= 0.1 && me.energy >= (tw.stats.energy ?? 3) + 1) {
       const half = (((tw.stats.cone_deg ?? 30) * Math.PI) / 180) * 0.45
       for (const e of enemies)
         if (!e.tr.ghost && t - e.tr.t <= 0.15 && e.d <= tw.stats.range * 0.93 && Math.abs(wrap(e.yaw - me.aim[0])) <= half && this.w.los(mx, my, mz + this.muzH, e.x, e.y, e.cz)) {
@@ -1177,6 +2065,50 @@ export class Brain {
     }
 
     if (primary && !primary.tr.ghost) {
+      // Hit by someone we have no fresh sight of, or heard someone close where we know of nobody:
+      // turn and look, once every few seconds. The retreat can only keep away from those we know
+      // of, and a hit from behind does half as much again.
+      if (t >= this.glanceNextT && !this.ffa) {
+        let yaw: number | null = null
+        const by = this.tracks.get(this.lastHurtBy)
+        if (t - this.lastHurtT < 0.6 && this.lastHurtBy !== primary.tr.id && (!by || by.ghost || t - by.t > 1.5)) yaw = this.lastHurtYaw
+        else if (t - this.strangerT < 0.6) yaw = this.strangerYaw
+        if (yaw !== null && Math.abs(wrap(yaw - me.aim[0])) > 0.9) {
+          this.glanceUntil = t + 0.3 + Math.abs(wrap(yaw - me.aim[0])) / Math.max(1, me.stats?.turn_rate ?? 4)
+          this.glanceYaw = yaw
+          this.glanceNextT = t + 5
+        }
+      }
+      // Nothing can fire for a second or more (magazine going in, laser cooling): the free moment to
+      // look where we are going, or behind us. Hunters come from every side and we only see what
+      // the torso faces; fleeing one of them into another we had not seen is how the retreat fails.
+      if (this.far() && t >= this.glanceUntil && t - this.lookT > 4 && t - this.lastGlanceEnd > 1.2) {
+        const gunBusy = !gw || gw.reload > 1.2 || gw.ammo <= 0
+        const lasBusy = !lw || (lw.cooldown > 1.2 && !((lw.charge ?? 0) > 0))
+        if (gunBusy && lasBusy) {
+          const sp = hyp(me.vel[0], me.vel[1])
+          let yaw = sp > 3 ? Math.atan2(me.vel[1], me.vel[0]) : wrap(me.aim[0] + Math.PI)
+          // already looking that way: then behind us instead
+          if (Math.abs(wrap(yaw - me.aim[0])) < 0.9) yaw = wrap(me.aim[0] + Math.PI)
+          const turn = Math.abs(wrap(yaw - me.aim[0])) / Math.max(1, me.stats?.turn_rate ?? 4)
+          const spare = Math.min(gw ? Math.max(gw.reload, gw.ammo <= 0 ? 1.5 : 0) : 9, lw ? lw.cooldown : 9)
+          // there and back inside the time nothing can fire anyway
+          if (2 * turn + 0.15 <= spare + 0.3) {
+            this.glanceUntil = t + turn + 0.15
+            this.glanceYaw = yaw
+            this.lookT = t
+          }
+        }
+      }
+      if (t < this.glanceUntil) {
+        this.lastGlanceEnd = this.glanceUntil
+        if (lw) {
+          const hold = (lw.charge ?? 0) > 0 && this.laserHold
+          act.fire[this.laser] = hold
+          this.laserHold = hold
+        }
+        return [this.glanceYaw, 0]
+      }
       const tr = primary.tr
       const floor = this.w.surface(primary.x, primary.y) + primary.hgt * 0.3
       const gunOk = !!gw && gw.ammo > 0 && !(gw.reload > 0) && primary.d <= gw.stats.range * 0.97
@@ -1230,7 +2162,8 @@ export class Brain {
 
     // farm crates and drones while healthy and alone; a drone that is shooting us dies regardless,
     // because its fire keeps resetting our repair timer
-    const farm = hpFrac >= 0.75 && (me.cubes ?? 0) < CUBE_TARGET
+    // (in a free-for-all gunfire draws company, so only when nobody has been around for a while)
+    const farm = hpFrac >= 0.75 && (me.cubes ?? 0) < CUBE_TARGET && (!this.wary || this.nearFoes === 0)
     const pest = t - this.npcHurtT < 4
     if ((farm || pest) && gw && label !== "zone") {
       let best: { x: number; y: number; z: number; vx: number; vy: number; rad: number; hgt: number; d: number } | null = null
@@ -1254,6 +2187,7 @@ export class Brain {
     }
     if (topUp) act.reload = true
     if (t - this.lastHurtT < 2.5) return [this.lastHurtYaw, 0]
+    if (t - this.heardT < 1.2) return [this.heardYaw, 0] // footsteps or a shot close by: look that way
     // sweep the torso: a full turn every ~2.6 s keeps everything within sight range in the 5 s memory
     const dt = 0.1
     return [wrap(this.cmdYaw + 2.4 * dt), 0]
