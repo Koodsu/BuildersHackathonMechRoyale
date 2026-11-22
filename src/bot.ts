@@ -129,7 +129,7 @@ export const PROBE = { survive: false, pacifist: false, noFfa: false, ceaseAt: 0
  * `ffaFrom` (clock time, 0 = off): practice ends at the cutoff, so a match played after it is the
  * free-for-all and is played survive-only from the first tick.
  */
-export const TUNING = { drops: true, standoff: false, wary: 0, seek: true, brawl: false, pro: true, rush: 0, rushMend: 0, fixedSeed: true, mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true, mortar: true, dodgeBoost: true, farmR: 120, idleStay: true, commit: true, noGlance: true, iso: true, fightLoot: true, plate: true, duel: true, search: true, lateHide: 140, ffaFrom: Date.UTC(2026, 10, 22, 16, 30) }
+export const TUNING = { drops: true, standoff: false, wary: 0, seek: true, brawl: false, pro: true, rush: 0, rushMend: 0, fixedSeed: true, mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true, mortar: true, dodgeBoost: true, farmR: 120, idleStay: true, commit: true, noGlance: true, iso: true, fightLoot: true, plate: true, duel: true, search: true, lateHide: 0, stage: true, ffaFrom: Date.UTC(2026, 10, 22, 16, 30) }
 
 interface Track {
   id: number
@@ -272,6 +272,9 @@ export class Brain {
   private pathGY = 0
   private hist: { t: number; x: number; y: number }[] = []
   private hop: { x: number; y: number } | null = null
+  private stageKX = 1e9
+  private stageKY = 1e9
+  private stage: { x: number; y: number } | null = null
   private healing = false
   private sprint = false
   private ghostT = 0
@@ -356,7 +359,7 @@ export class Brain {
     // Mixed with the clock on purpose: two runs of the same build are then two different samples.
     // (tests pass `entropy` to get the same match twice)
     // (`fixedSeed`: nothing from the clock, so a build can be scored against another on the same matches)
-    let s = ((hello.seed ?? 1) ^ ((hello.entropy ?? (TUNING.fixedSeed ? 0x7c21d05f : Date.now())) & 0x7fffffff) ^ ((hello.slot ?? 0) * 7919)) >>> 0
+    let s = ((hello.seed ?? 1) ^ ((hello.entropy ?? (TUNING.fixedSeed ? 0x3be94a17 : Date.now())) & 0x7fffffff) ^ ((hello.slot ?? 0) * 7919)) >>> 0
     this.rnd = () => {
       s = (s + 0x6d2b79f5) >>> 0
       let x = Math.imul(s ^ (s >>> 15), 1 | s)
@@ -2235,6 +2238,12 @@ export class Brain {
     }
     this.hop = null
     const boost = g.boost && me.energy > 5
+    // A goal off the walkable grid (the stadium field) is reached by walking to the grid and hopping
+    // the rest. Where the nearest grid cell faces a wall too tall for the jets, walk instead to a
+    // cell from which the straight line to the goal can be hopped.
+    const st = TUNING.stage ? this.stageFor(g.x, g.y) : null
+    const px = st ? st.x : g.x
+    const py = st ? st.y : g.y
     // margin 1 m: with the grid's rounding that keeps the real wall at least a radius away, so we never scrape
     if (dGoal < 150 && nav.lineWalkable(mx, my, g.x, g.y, 1)) return { x: (g.x - mx) / dGoal, y: (g.y - my) / dGoal, boost, jump: false }
     const zn = this.zoneNow
@@ -2248,7 +2257,7 @@ export class Brain {
       // Outside ground costs extra only while we are inside (so we do not leave); once outside,
       // everything around us is outside and the shortest way back in is what we want.
       const keepIn = zn && zn.cr > 12 && hyp(mx - zn.cx, my - zn.cy) < zn.cr - 6
-      this.path = nav.findPath(mx, my, g.x, g.y, 18000, keepIn ? { x: zn.cx, y: zn.cy, r: zn.cr - 6, pen: 5 } : undefined)
+      this.path = nav.findPath(mx, my, px, py, 18000, keepIn ? { x: zn.cx, y: zn.cy, r: zn.cr - 6, pen: 5 } : undefined)
       this.pathI = 0
       this.pathT = this.t
       this.pathGX = g.x
@@ -2258,7 +2267,7 @@ export class Brain {
       this.overTop = false
       this.pathOut = 0
       const q = this.path
-      const gc = nav.snap(g.x, g.y, 160)
+      const gc = nav.snap(px, py, 160)
       this.pathPartial = !!q && q.length >= 2 && gc >= 0 && hyp(q[q.length - 2] - nav.cx(gc), q[q.length - 1] - nav.cy(gc)) > 3
       if (g.kind === "zone" && q && q.length >= 4 && zn) {
         let len = 0
@@ -2314,7 +2323,7 @@ export class Brain {
     const ey = p[2 * n - 1]
     // a long route can come back unfinished (the search has a budget): plan the rest before we run out of it
     if (this.pathPartial && hyp(ex - mx, ey - my) < 30 && this.t - this.pathT > 0.5) this.pathLost = true
-    if (hyp(ex - mx, ey - my) < 5 && !this.pathPartial) {
+    if (hyp(ex - mx, ey - my) < (st ? 1.6 : 5) && !this.pathPartial) {
       if (this.pathAlt) return { x: 0, y: 0, boost: false, jump: false } // as far in as walking gets us
       // end of the walkable path but not at the goal: the goal is off the grid (roof, pit)
       if (hyp(g.x - ex, g.y - ey) > Math.max(3, g.stop)) {
@@ -2353,6 +2362,63 @@ export class Brain {
       return this.travel(g)
     }
     return d > 1e-6 ? { x: (tx - mx) / d, y: (ty - my) / d, boost, jump: false } : { x: 0, y: 0, boost: false, jump: false }
+  }
+
+  /** From a spot on the ground: every wall on the straight line to a point is one the jets climb with room to spare, across our width. */
+  private hopOk(sx: number, sy: number, tx: number, ty: number): boolean {
+    const w = this.w
+    const d = hyp(tx - sx, ty - sy)
+    if (d < 4) return true
+    const ux = (tx - sx) / d
+    const uy = (ty - sy) / d
+    for (const o of [0, 1, -1]) {
+      const ox = sx - uy * this.R * o
+      const oy = sy + ux * this.R * o
+      let cur = w.over(sx, sy)
+      let climb = 0
+      for (let q = 1; q <= d; q += 1) {
+        const x = ox + ux * q
+        const y = oy + uy * q
+        if (!w.inGrid(x, y) || x < w.bMinX || x > w.bMaxX || y < w.bMinY || y > w.bMaxY) return false
+        const sf = w.over(x, y)
+        if (sf - cur > STEP_UP) {
+          if (sf - cur > 28) return false
+          climb += sf - cur
+        }
+        cur = sf
+      }
+      if (climb > 70) return false
+    }
+    return true
+  }
+
+  /** For a goal off the grid whose nearest walkable cell cannot hop to it: the walkable cell to hop from, or null. */
+  private stageFor(gx: number, gy: number): { x: number; y: number } | null {
+    if (hyp(gx - this.stageKX, gy - this.stageKY) <= 4) return this.stage
+    this.stageKX = gx
+    this.stageKY = gy
+    this.stage = null
+    const nav = this.nav
+    if (nav.snap(gx, gy, 3) >= 0) return null
+    const c0 = nav.snap(gx, gy, 160)
+    if (c0 < 0) return null
+    const r0 = hyp(nav.cx(c0) - gx, nav.cy(c0) - gy)
+    if (r0 > 120 || this.hopOk(nav.cx(c0), nav.cy(c0), gx, gy)) return null
+    const [mx, my] = this.me.pos as number[]
+    let bd = 1e9
+    for (let r = r0; r <= r0 + 60; r += 4) {
+      for (let a = 0; a < 48; a++) {
+        const c = nav.snap(gx + r * Math.cos((a * Math.PI) / 24), gy + r * Math.sin((a * Math.PI) / 24), 2)
+        if (c < 0) continue
+        const x = nav.cx(c)
+        const y = nav.cy(c)
+        const cost = hyp(x - mx, y - my) + hyp(x - gx, y - gy)
+        if (cost >= bd || !this.hopOk(x, y, gx, gy)) continue
+        bd = cost
+        this.stage = { x, y }
+      }
+    }
+    return this.stage
   }
 
   /** The straight line to a point crosses only walls a jet can climb (and does not leave the map). */
