@@ -13,6 +13,7 @@ import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { Brain, TUNING, PROBE } from "../src/bot.ts"
 if (process.env.PROBE === "lightFirst") PROBE.lightFirst = true
+if (process.env.PROBE === "farm") PROBE.farm = true
 
 // DROPS=1 switches the bot's supply-drop behaviour on and makes the three drops fall
 if (process.env.DROPS) TUNING.drops = true

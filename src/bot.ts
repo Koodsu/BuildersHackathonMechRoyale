@@ -79,8 +79,13 @@ const STANDOFF = 170
  *                by that time, which shows when our kills come and when they stop;
  *   `lightFirst` the lightning gun wanted ahead of the laser;
  *   `noDuck`     no leaving the fight for cover while our weapons reload.
+ *   `closeMul`   the range we fight from, times this (1 = as build 5: 165 m with a laser against a
+ *                mech without one, 95 m gun against gun; never under 28 m);
+ *   `hunt`       go after any mech in sight or last seen, from 55% health, with or without a second
+ *                weapon, from 10 s on: kills between the hunters the squad sends;
+ *   `farm`       crates shot and collected from 60% health instead of 90%, and before seeking.
  */
-export const PROBE = { survive: false, pacifist: false, noFfa: false, ceaseAt: 0, lightFirst: false, noDuck: false }
+export const PROBE = { survive: false, pacifist: false, noFfa: false, ceaseAt: 0, lightFirst: false, noDuck: false, closeMul: 0.5, hunt: false, farm: false }
 export const TUNING = { drops: true, standoff: false, wary: 0, seek: true, brawl: false, pro: true, fixedSeed: true, mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true }
 
 interface Track {
@@ -1165,7 +1170,7 @@ export class Brain {
       // (The line is two thirds of our health, not more: the circle is 240 m across the radius by
       // 195 s and 140 m by 265 s, after which there is no room to stand off in, so the kills have to
       // be made in the first three minutes and waiting to be whole costs more than it saves.)
-      const target = (this.far() ? this.me.hp >= 0.65 * this.me.max_hp && (this.laser >= 0 || (this.me.cubes ?? 0) >= 5) : this.brawling()) && !this.wary && !tr.ghost && age <= 2 && d <= 215
+      const target = (this.far() ? this.me.hp >= 0.65 * this.me.max_hp && (this.laser >= 0 || (this.me.cubes ?? 0) >= 5) : this.brawling() || (PROBE.hunt && this.pro() && this.me.hp >= 0.55 * this.me.max_hp && this.t > 10)) && !this.wary && !tr.ghost && age <= 2 && d <= 215
       if (all ? d > 280 : !(attacked || fighting || prey || target || d <= 120 || (d <= 280 && (closing > 3 || pointing)))) continue
       const fresh = !tr.ghost && age <= 0.15
       const shootable = fresh && d <= maxRange && this.w.los(mx, my, mz + this.muzH, x, y, cz)
@@ -1347,10 +1352,11 @@ export class Brain {
     // range 84 m, standing still 40% of the time, first shot 4 s into the match, no backing off)
     if (this.brawling()) return this.light >= 0 && me.energy > 15 && e.d < 60 ? 28 : 85
     if (this.light >= 0 && me.energy > 15) return 28
-    if (theyLight) return this.laser >= 0 ? 110 : 90
-    if (this.laser >= 0 && !theyLaser) return 165 // the top bots' guns land 55% at 80-120 m, 40% at 120-160, 33% beyond
-    if (theyLaser && this.laser < 0) return 40
-    return 95
+    const k = this.ffa ? 1 : PROBE.closeMul
+    if (theyLight) return Math.max(28, (this.laser >= 0 ? 110 : 90) * k)
+    if (this.laser >= 0 && !theyLaser) return Math.max(28, 165 * k) // the top bots' guns land 55% at 80-120 m, 40% at 120-160, 33% beyond
+    if (theyLaser && this.laser < 0) return Math.max(28, 40 * k)
+    return Math.max(28, 95 * k)
   }
 
   /**
@@ -1731,15 +1737,19 @@ export class Brain {
     // 3. Against house bots the clock is theirs (the whole squad comes late on, grown): with nobody
     // in sight, healthy and armed, go to where one was last seen rather than wait for it. A kill is a
     // point and at least two cubes, so this comes before crates.
+    const cratesFirst = PROBE.farm && this.pro()
+    for (const step of cratesFirst ? [4, 3] : [3, 4]) {
+    if (step === 3) {
     // (`pro`: whole, with both weapons in hand, and past the opening half minute, which is for looting
     // and in a free-for-all is when the first death tells us what kind of match this is)
-    const proSeek = this.pro() && hpFrac >= 0.8 && !empty && (t > 25 || this.killCount > 0)
+    const proSeek = this.pro() && (PROBE.hunt ? hpFrac >= 0.55 && t > 10 : hpFrac >= 0.8 && !empty && (t > 25 || this.killCount > 0))
     if (TUNING.seek && !this.wary && (proSeek || (this.brawling() ? hpFrac >= 0.5 : this.far() && hpFrac >= 0.7 && (this.laser >= 0 || (me.cubes ?? 0) >= 4)))) {
       const q = this.quarry(zone)
       if (q) return { x: q.x, y: q.y, stop: this.brawling() || (q as any).low ? 40 : proSeek ? 70 : STANDOFF - 10, boost: false, kind: "seek" }
     }
+    } else {
     // 4. crates, when healthy enough that shooting does not cost us healing
-    if (hpFrac >= 0.9 && (me.cubes ?? 0) < cubeGoal && (!this.wary || this.nearFoes === 0 || (!this.ffa && this.nearFoeD >= 150))) {
+    if (hpFrac >= (PROBE.farm && this.pro() ? 0.6 : 0.9) && (me.cubes ?? 0) < cubeGoal && (!this.wary || this.nearFoes === 0 || (!this.ffa && this.nearFoeD >= 150))) {
       let best: Item | null = null
       let bd = this.wary ? 120 : 220
       for (const c of this.crates.values()) {
@@ -1753,6 +1763,8 @@ export class Brain {
         const clear = bd < 45 && this.w.los(mx, my, mz + this.muzH, best.x, best.y, best.z + 1.2)
         return { x: best.x, y: best.y, stop: clear ? 20 : 3, boost: false, kind: "crate" }
       }
+    }
+    }
     }
     // 5. nothing known: get inside the next circle, then wander it looking for loot
     if (hyp(mx - zone.nx, my - zone.ny) > zone.inner + 5) return { x: zone.gx, y: zone.gy, stop: 3, boost: false, kind: "rotate" }
@@ -2513,7 +2525,7 @@ export class Brain {
     // because its fire keeps resetting our repair timer
     // (in a free-for-all gunfire draws company, so only when nobody has been around for a while)
     // (crate hits count as dealing damage, which holds off our repair: mend first, farm after)
-    const farm = hpFrac >= 0.9 && (me.cubes ?? 0) < CUBE_TARGET && (!this.wary || this.nearFoes === 0 || (!this.ffa && this.nearFoeD >= 150))
+    const farm = hpFrac >= (PROBE.farm && this.pro() ? 0.6 : 0.9) && (me.cubes ?? 0) < CUBE_TARGET && (!this.wary || this.nearFoes === 0 || (!this.ffa && this.nearFoeD >= 150))
     const pest = t - this.npcHurtT < 4
     if ((farm || pest) && gw && label !== "zone") {
       let best: { x: number; y: number; z: number; vx: number; vy: number; rad: number; hgt: number; d: number } | null = null

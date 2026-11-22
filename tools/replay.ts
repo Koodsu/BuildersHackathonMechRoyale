@@ -14,6 +14,9 @@ if (process.env.PROBE === "noFfa") PROBE.noFfa = true
 if (process.env.PROBE === "cease") PROBE.ceaseAt = 75
 if (process.env.PROBE === "lightFirst") PROBE.lightFirst = true
 if (process.env.PROBE === "noDuck") PROBE.noDuck = true
+if (process.env.PROBE === "close") PROBE.closeMul = 0.5
+if (process.env.PROBE === "hunt") PROBE.hunt = true
+if (process.env.PROBE === "farm") PROBE.farm = true
 
 // switches, to check that the comparison builds do not crash either
 if (process.env.BRAWL) TUNING.brawl = true
