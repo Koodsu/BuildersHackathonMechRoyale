@@ -359,7 +359,7 @@ export class Brain {
     // Mixed with the clock on purpose: two runs of the same build are then two different samples.
     // (tests pass `entropy` to get the same match twice)
     // (`fixedSeed`: nothing from the clock, so a build can be scored against another on the same matches)
-    let s = ((hello.seed ?? 1) ^ ((hello.entropy ?? (TUNING.fixedSeed ? 0x63f18b0d : Date.now())) & 0x7fffffff) ^ ((hello.slot ?? 0) * 7919)) >>> 0
+    let s = ((hello.seed ?? 1) ^ ((hello.entropy ?? (TUNING.fixedSeed ? 0x15c9a47e : Date.now())) & 0x7fffffff) ^ ((hello.slot ?? 0) * 7919)) >>> 0
     this.rnd = () => {
       s = (s + 0x6d2b79f5) >>> 0
       let x = Math.imul(s ^ (s >>> 15), 1 | s)
