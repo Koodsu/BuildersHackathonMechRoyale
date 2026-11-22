@@ -22,7 +22,8 @@ node tools/maptest.ts            # map model against the kit's recorded match
 node tools/walk.ts               # legs reach their goal across the map (ground, roofs, stadium)
 node tools/zonetest.ts 80        # alone through whole zone schedules: health lost to the zone, and the final collapse
 node tools/loottest.ts 24        # alone with loot scattered: time to a second weapon, cubes gathered (DROPS=1 adds supply drops)
-node tools/aimtest.ts            # shots land on a moving target
+node tools/aimtest.ts            # shots land on a moving target (gun, laser with and without the faster-capacitor upgrade, mortar)
+node tools/mortartest.ts         # the mortar's tube angle flown as a shell: where it comes down
 node tools/dodgetest.ts          # how often a gun hits the bot's fight movement (pass a directory to test an older build)
 node tools/bullettest.ts         # guns that aim like house bots fire at the bot, which is shown the bullets: how many hit, with and without stepping out of their lines (DODGE=0)
 node tools/tactics.ts            # stances: stand off and give ground, heal first, duck a charging laser, free-for-all
@@ -46,7 +47,14 @@ The bot cannot see who its opponents are, so it works out which kind of match it
 
 **Opening (first 26 s, or until our first kill).** The kind of match is not known yet: collect a second weapon and cubes, fire at nobody who is not on us, and keep away from mechs that are close or facing us. Someone who fires at us, or walks at us with guns on us, is fought the long-range way at once.
 
-**Build 5 (current defaults: `pro: true`, `standoff: false`, `brawl: false`, `wary: 0`, `fixedSeed: true`).** Practice scores so far: build 2 (mid-range, from cover) 4.42, build 3b (long range) 4.00, build 4 (stand at 85 m) 3.44. Build 5 goes back to build 2's mid-range cover fighting and adds what good battle-royale players do around a fight:
+**Build 6 (2026-11-22; switches `mortar`, `dodgeBoost`, `farmR`, `idleStay` in `TUNING`).** Four changes on top of build 5, each one something other teams' published notes report as measured on the practice scorer; none has a score of ours yet. Two commits carry them: one with build 5's mid-range fight (`rush: 0`), one with probe Q's fight (`rush: 25`, close to 25 m and never break off: our best score so far, 4.60).
+
+- The laser is let go when it is full, also after the faster-capacitor upgrade. The charge we are shown is rounded to two decimals (0.56 for a full 0.5625 s), which the old comparison never passed, so the beam stayed held until it fired by itself two seconds later, at half walking speed all the while. `tools/aimtest.ts` now shows it: 5 beams in 20 s before, 9 after.
+- A mortar is taken when no laser or lightning gun is known (within 80 m), and fired: the flat arc, aimed 4 m beyond the mech and led by most of its walk, so the shell passes through it on the way down (`lob()`, `tools/mortartest.ts`). It is swapped for a laser or a lightning gun when one is underfoot.
+- A bullet that a sidestep at a walk does not clear is sidestepped on the jets.
+- No walks of more than 120 m for crates against house bots (220 m before), and with a laser in hand and nothing known to fetch or go after, the bot stays where it is instead of wandering the circle.
+
+**Build 5 (the fight these build on: `pro: true`, `standoff: false`, `brawl: false`, `wary: 0`, `fixedSeed: true`).** Practice scores so far: build 2 (mid-range, from cover) 4.42, build 3b (long range) 4.00, build 4 (stand at 85 m) 3.44. Build 5 goes back to build 2's mid-range cover fighting and adds what good battle-royale players do around a fight:
 
 - take the fights we are favoured in (health times firepower, 1.6 to 1 or better) and whoever comes for us, from cover, ducking behind it while reloading or while a laser charges on us;
 - finish them: a mech under 40% health that backs off is closed on to inside 40 m (28 m with a lightning gun) and followed round buildings, since it mends at 45 HP/s once left alone;

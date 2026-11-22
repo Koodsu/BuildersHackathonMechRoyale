@@ -33,8 +33,11 @@ const UPGRADES = [
   "lightning_efficiency", "capacitor", "reactor", "gyros", "jets",
   "lightning_range", "lightning_chain", "sensors", "laser_pierce", "mortar_reload", "mortar_splash", "mortar_velocity",
 ]
-/** Second-slot weapons we pick up, best first. */
-let WANT = ["laser", "lightning"]
+/**
+ * Second-slot weapons we pick up, best first. A mortar only when nothing better is known: it is
+ * the weakest of the three and makes lasers hurt us more, but an empty slot fires nothing at all.
+ */
+let WANT = ["laser", "lightning", "mortar"]
 /**
  * Stop seeking cubes here. The HP and damage bonuses cap at 10, and every cube makes us 5% bigger
  * with no cap. Past 10 the only gain is one upgrade per 5 to 7 cubes (about +15% of one thing),
@@ -105,7 +108,7 @@ const STANDOFF = 170
  * kills is how hurt we are when the squad's better bots arrive, and the time to mend is there.
  */
 export const PROBE = { survive: false, pacifist: false, noFfa: false, ceaseAt: 0, lightFirst: false, noDuck: false, closeMul: 1, hunt: false, farm: false, trigMul: 1, noGun: false, noLaser: false, noLead: false, fireFrom: 0, reset: 0 }
-export const TUNING = { drops: true, standoff: false, wary: 0, seek: true, brawl: false, pro: true, rush: 0, rushMend: 0, fixedSeed: true, mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true }
+export const TUNING = { drops: true, standoff: false, wary: 0, seek: true, brawl: false, pro: true, rush: 0, rushMend: 0, fixedSeed: true, mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true, mortar: true, dodgeBoost: true, farmR: 120, idleStay: true }
 
 interface Track {
   id: number
@@ -212,6 +215,9 @@ export class Brain {
   private gun = -1
   private laser = -1
   private light = -1
+  private mortar = -1
+  private chargeNow = 0
+  private chargePrev = 0
 
   // memory
   private tracks = new Map<number, Track>()
@@ -318,6 +324,7 @@ export class Brain {
   constructor(hello: any) {
     this.cfg = hello.config
     WANT = PROBE.lightFirst ? ["lightning", "laser"] : ["laser", "lightning"]
+    if (TUNING.mortar) WANT.push("mortar")
     // Mixed with the clock on purpose: two runs of the same build are then two different samples.
     // (tests pass `entropy` to get the same match twice)
     // (`fixedSeed`: nothing from the clock, so a build can be scored against another on the same matches)
@@ -449,13 +456,16 @@ export class Brain {
       this.nav.rebuild(navR)
       this.path = null
     }
-    this.gun = this.laser = this.light = -1
+    this.gun = this.laser = this.light = this.mortar = -1
     for (let i = 0; i < me.weapons.length; i++) {
       const k = me.weapons[i]?.kind
       if (k === "gun") this.gun = i
       else if (k === "laser") this.laser = i
       else if (k === "lightning") this.light = i
+      else if (k === "mortar") this.mortar = i
     }
+    this.chargePrev = this.chargeNow
+    this.chargeNow = this.laser >= 0 ? (me.weapons[this.laser].charge ?? 0) : 0
     const [mx, my, mz] = me.pos as number[]
     const hpFrac = me.hp / Math.max(1, me.max_hp)
     const act: any = { fire: [false, false] }
@@ -884,7 +894,9 @@ export class Brain {
     const swap = empty || (WANT[0] === "laser" ? this.laser : this.light) >= 0 ? -1 : me.weapons.findIndex((x: any) => x && x.kind !== "gun")
     if (empty || swap >= 0) {
       const reach = (cfg.loot?.pickup_radius ?? 4) * 0.95
-      let bestRank = empty ? 99 : 1
+      // (in place of a lightning gun only the first choice; in place of a mortar either of the others)
+      const heldRank = swap >= 0 ? WANT.indexOf(me.weapons[swap].kind) : -1
+      let bestRank = empty ? 99 : heldRank > 1 ? heldRank : 1
       for (const p of obs.pickups) {
         const rank = WANT.indexOf(p.kind)
         if (rank < 0 || rank >= bestRank || this.ignore.has(p.id)) continue
@@ -1763,7 +1775,7 @@ export class Brain {
         const rank = WANT.indexOf(p.kind)
         if (rank < 0 || this.ignore.has(p.id) || (!empty && rank > 0) || this.barred(p.x, p.y)) continue
         const d = hyp(p.x - mx, p.y - my)
-        if (d > 260 || !this.reachable(p, true) || !this.zoneOk(zone, p.x, p.y)) continue
+        if (d > (p.kind === "mortar" ? 80 : 260) || !this.reachable(p, true) || !this.zoneOk(zone, p.x, p.y)) continue
         // a roof costs a climb (energy and time): worth about 70 m of walking
         const roof = p.z - this.w.ground(p.x, p.y) >= 2.5
         // (a laser is worth a long walk: at the range we fight from it is two thirds of our damage,
@@ -1809,7 +1821,10 @@ export class Brain {
     // 4. crates, when healthy enough that shooting does not cost us healing
     if (hpFrac >= (PROBE.farm && this.pro() ? 0.6 : 0.9) && (me.cubes ?? 0) < cubeGoal && (!this.wary || this.nearFoes === 0 || (!this.ffa && this.nearFoeD >= 150))) {
       let best: Item | null = null
-      let bd = this.wary ? 120 : 220
+      // (against house bots not the long walks: teams that scored walks to crates and drones against
+      // none lost a quarter to half a point by them, and our own probe J did; the bot most of the
+      // top of the board runs loots within 120 to 150 m)
+      let bd = this.wary ? 120 : TUNING.farmR
       for (const c of this.crates.values()) {
         const d = hyp(c.x - mx, c.y - my)
         if (d < bd && this.reachable(c) && this.zoneOk(zone, c.x, c.y) && !this.barred(c.x, c.y)) {
@@ -1840,6 +1855,10 @@ export class Brain {
       const p = this.postSpot(zone)
       if (p) return { x: p.x, y: p.y, stop: 2.5, boost: false, kind: "post" }
     }
+    // Against house bots, with a laser in hand: stay where we are. They know where we are and come
+    // to us; wandering only shows us to more of them, and standing mends just as fast. Without a
+    // laser the walk goes on: it is how one is found.
+    if (TUNING.idleStay && !this.wary && this.laser >= 0) return { x: mx, y: my, stop: 5, boost: false, kind: "post" }
     if (!this.explore || t > this.explore.until || hyp(this.explore.x - mx, this.explore.y - my) < 6 || hyp(this.explore.x - zone.nx, this.explore.y - zone.ny) > zone.inner + 5) {
       this.explore = null
       for (let k = 0; k < 12 && !this.explore; k++) {
@@ -2376,6 +2395,22 @@ export class Brain {
         best = { x: cx, y: cy, boost: k >= 0 && want.boost && me.energy > 10, jump: false }
       }
     }
+    // Still in a bullet's way at a walk: the same sidesteps on the jets. (A team that scored its
+    // dodge with and without the boost lost two thirds of a point without it.)
+    if (TUNING.dodgeBoost && bestHits > 0 && speed < run && me.energy > 20) {
+      for (let k = 0; k < 12; k++) {
+        const cx = Math.cos((k * TAU) / 12)
+        const cy = Math.sin((k * TAU) / 12)
+        if (!this.nav.lineWalkable(mx, my, mx + cx * 8, my + cy * 8, 0.3)) continue
+        const r = hitsFor(cx, cy, run)
+        if (r.hits < 0) continue
+        if (r.hits < bestHits) {
+          bestHits = r.hits
+          bestClear = r.clear
+          best = { x: cx, y: cy, boost: true, jump: false }
+        }
+      }
+    }
     return best
   }
 
@@ -2440,6 +2475,64 @@ export class Brain {
     const dy = py - oy
     const dz = pz - oz
     return { yaw: Math.atan2(dy, dx), pitch: Math.atan2(dz, hyp(dx, dy)), d: hyp(dx, dy, dz) }
+  }
+
+  /**
+   * Where to point the mortar tube: the flat arc, at a point a few metres beyond the mech's feet,
+   * led by most of its walk. The shell comes down at 15 to 25 degrees, so on its way to a point
+   * just behind a 9 m tall mech it passes through the mech: aiming a little long turns an error
+   * in range (theirs for walking on or stopping, ours for not knowing exactly how the server steps
+   * the fall) into a direct hit instead of a burst short of it. Null when out of reach or too close.
+   */
+  private lob(e: Enemy, st: any): { yaw: number; pitch: number; d: number; pitchTol: number } | null {
+    const me = this.me
+    const cfg = this.cfg
+    const v = st.speed ?? cfg.weapons?.mortar?.speed ?? 72
+    const g = st.gravity ?? cfg.weapons?.mortar?.gravity ?? 22
+    const splash = st.splash_radius ?? cfg.weapons?.mortar?.splash_radius ?? 7
+    const out = this.R + 0.5
+    const tubeZ = me.pos[2] + this.H + 0.5
+    const LONG = 4
+    const LEAD = 0.7
+    const d0 = Math.max(1, hyp(e.x - me.pos[0], e.y - me.pos[1]))
+    let tx = e.x + ((e.x - me.pos[0]) / d0) * LONG
+    let ty = e.y + ((e.y - me.pos[1]) / d0) * LONG
+    let res: { yaw: number; pitch: number; d: number; pitchTol: number } | null = null
+    let prev = 0.15
+    for (let it = 0; it < 4; it++) {
+      const dx = tx - me.pos[0]
+      const dy = ty - me.pos[1]
+      const dh = hyp(dx, dy)
+      if (dh < splash + this.R + 6 || dh > 150) return null
+      // (the shell starts a little way out along the aim: forward and up from the tube)
+      const d = dh - out * Math.cos(prev)
+      // (at their feet; one in the air a little above the ground under it: it is on its way down)
+      const gz = this.w.surface(tx, ty)
+      const dz = Math.max(gz, Math.min(e.z, gz + 6)) - (tubeZ + out * Math.sin(prev))
+      const disc = v * v * v * v - g * (g * d * d + 2 * dz * v * v)
+      if (disc < 0) return null
+      const pitch = Math.atan2(v * v - Math.sqrt(disc), g * d)
+      const flight = d / (v * Math.cos(pitch))
+      prev = pitch
+      // how far the landing point moves for a small change of pitch: the tolerance that keeps the
+      // shell within 2.5 m along the line
+      const land = (th: number) => {
+        const c2 = Math.cos(th) * Math.cos(th)
+        const tn = Math.tan(th)
+        return ((tn + Math.sqrt(Math.max(0, tn * tn - (2 * g * dz) / (v * v * c2)))) * v * v * c2) / g
+      }
+      const slope = Math.abs(land(pitch + 0.004) - land(pitch)) / 0.004 // metres of range per radian
+      res = { yaw: Math.atan2(dy, dx), pitch, d: dh, pitchTol: clamp(2.5 / Math.max(1, slope), 0.004, 0.03) }
+      const lx = e.x + e.tr.vx * flight * LEAD
+      const ly = e.y + e.tr.vy * flight * LEAD
+      const ld = Math.max(1, hyp(lx - me.pos[0], ly - me.pos[1]))
+      tx = lx + ((lx - me.pos[0]) / ld) * LONG
+      ty = ly + ((ly - me.pos[1]) / ld) * LONG
+    }
+    if (!res) return null
+    const lim = cfg.mech
+    if (res.pitch > (lim.max_pitch ?? 1.3) || res.pitch < (lim.min_pitch ?? -0.7)) return null
+    return res
   }
 
   private aligned(sol: Sol, rad: number, hgt: number, mul = 1): boolean {
@@ -2546,9 +2639,13 @@ export class Brain {
           const minFrac = cfg.weapons?.laser?.min_frac ?? 0.35
           const frac = clamp(ch / full, 0, 1)
           const dmg = lw.stats.damage * (minFrac + (1 - minFrac) * frac) * cubeMul * (tr.weapons.includes("mortar") ? 1 + (lw.stats.cookoff ?? 0.6) : 1)
-          const charged = ch >= full - 1e-3
+          // (The charge we are shown is rounded to two decimals: with the faster-capacitor upgrade
+          // the full charge is 0.5625 s and we are shown 0.56, which a plain comparison never
+          // passes, so the beam stayed held for two more seconds at half walking speed. A charge
+          // that has stopped growing near the top is full too.)
+          const charged = ch >= full - 0.006 || (ch >= full - 0.06 && ch <= this.chargePrev + 1e-6)
           const lethal = ch >= (cfg.weapons?.laser?.min_charge ?? 0.15) && tr.hp <= dmg * 0.95
-          useLaser = ch + 0.1 >= full - 1e-3 || lethal || !gunOk
+          useLaser = ch + 0.1 >= full - 0.006 || charged || lethal || !gunOk
           // let go only with the beam on the target; otherwise keep holding (it fires by itself after hold_s)
           hold = !(primary.shootable && inRange && (charged || lethal) && this.aligned(lnow, primary.rad, primary.hgt))
         } else if (lw.cooldown <= 0.05 && primary.shootable && inRange) {
@@ -2560,6 +2657,18 @@ export class Brain {
       }
       const sol = useLaser || !gsol ? lsol : gsol
       aim = [sol.yaw, sol.pitch]
+      // The mortar: when it is ready, the torso goes to the lob for the two or three ticks it takes
+      // and comes back to the gun. Shells are sent only at someone we can see, far enough off that
+      // the blast does not reach us.
+      const mw = this.mortar >= 0 ? me.weapons[this.mortar] : null
+      if (mw && primary.shootable && mw.cooldown <= 0.25) {
+        const ms = this.lob(primary, mw.stats)
+        if (ms) {
+          aim = [ms.yaw, ms.pitch]
+          const yawTol = Math.atan2(Math.max(2, primary.rad * 0.8), ms.d)
+          if (mw.cooldown <= 0.05 && Math.abs(wrap(me.aim[0] - ms.yaw)) <= yawTol && Math.abs(me.aim[1] - ms.pitch) <= ms.pitchTol) act.fire[this.mortar] = true
+        }
+      }
       if (gw && gnow && gunOk && primary.shootable && this.aligned(gnow, primary.rad + 0.3, primary.hgt, this.ffa ? 1 : PROBE.trigMul)) act.fire[this.gun] = true
       if (gw && !act.fire[this.gun] && !(gw.reload > 0) && gw.ammo < gw.stats.mag && t - this.lastShotT > 1.5 && (gw.ammo <= gw.stats.mag * 0.5 || primary.d > 60)) act.reload = true
       // out of our memory for a while: they could come from anywhere, so sweep instead of staring at a wall
