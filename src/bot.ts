@@ -57,7 +57,7 @@ const NAV_CUBES = 30
  */
 const STANDOFF = 170
 /** Switches for behaviours we may want to score separately. */
-export const TUNING = { drops: true, standoff: true, wary: 26, seek: true, brawl: false, mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true }
+export const TUNING = { drops: true, standoff: true, wary: 0, seek: true, brawl: true, mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true }
 
 interface Track {
   id: number
@@ -283,7 +283,7 @@ export class Brain {
       const per = this.cfg.cubes?.size_per_cube ?? 0.05
       const r0 = this.cfg.mech.radius
       const began = Date.now()
-      for (let c = 0; c <= NAV_CUBES && (c <= CUBE_TARGET || Date.now() - began < 4000); c++) {
+      for (let c = 0; c <= NAV_CUBES && (c === 0 || Date.now() - began < (c <= CUBE_TARGET ? 9000 : 4000)); c++) {
         this.nav.rebuild(r0 * (1 + per * c))
         this.navCubes = c
       }
@@ -713,6 +713,7 @@ export class Brain {
             }
           } else if (primary.shootable && primary.d <= pref + 25 && !this.mortarFoe && !shells.some((sh) => hyp(mx - sh.x, my - sh.y) < sh.r + 3)) mv = still
         }
+        if (this.brawling() && primary.shootable && Math.abs(primary.d - pref) < 30 && !shells.some((sh) => hyp(mx - sh.x, my - sh.y) < sh.r + 3)) mv = still
         label = "fight"
         // it has gone behind something: go round after it rather than wait for it to come back mended
         if (this.finishing && !this.ring && !primary.shootable && t - this.lastShotT > 0.6) {
@@ -1296,7 +1297,9 @@ export class Brain {
     const theyLaser = e.tr.weapons.includes("laser")
     const theyLight = e.tr.weapons.includes("lightning")
     if (this.far()) return this.rangeNow
-    if (this.brawling()) return this.light >= 0 && me.energy > 15 ? 28 : 55
+    // (85 m, standing: what the teams tied at 6.19 do on the match feed, 37 showdowns: median gun
+    // range 84 m, standing still 40% of the time, first shot 4 s into the match, no backing off)
+    if (this.brawling()) return this.light >= 0 && me.energy > 15 && e.d < 60 ? 28 : 85
     if (this.light >= 0 && me.energy > 15) return 28
     if (theyLight) return this.laser >= 0 ? 110 : 90
     if (this.laser >= 0 && !theyLaser) return 165 // the top bots' guns land 55% at 80-120 m, 40% at 120-160, 33% beyond
