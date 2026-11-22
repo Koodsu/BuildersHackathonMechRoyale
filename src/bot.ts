@@ -99,9 +99,13 @@ const STANDOFF = 170
  * `fireFrom` (seconds, 0 = off): survive-only play with no trigger pulled until this time, then the
  * build's normal play. If the kills are only put off (score stays), what stops them is not the
  * clock but something our own kills set off; if they are lost, the squad closes in on the clock.
+ * `reset` (share of health, 0 = off): after every kill, survive-only play (unseen, fighting only an
+ * attacker) until our health is back to this share, or 45 s have gone. Probes U and V showed that
+ * time costs little (no shot for 120 s lost no more than no shot for 60 s), so what ends the
+ * kills is how hurt we are when the squad's better bots arrive, and the time to mend is there.
  */
-export const PROBE = { survive: false, pacifist: false, noFfa: false, ceaseAt: 0, lightFirst: false, noDuck: false, closeMul: 1, hunt: false, farm: false, trigMul: 1, noGun: false, noLaser: false, noLead: false, fireFrom: 0 }
-export const TUNING = { drops: true, standoff: false, wary: 0, seek: true, brawl: false, pro: true, rush: 0, rushMend: 0, fixedSeed: true, mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true }
+export const PROBE = { survive: false, pacifist: false, noFfa: false, ceaseAt: 0, lightFirst: false, noDuck: false, closeMul: 1, hunt: false, farm: false, trigMul: 1, noGun: false, noLaser: false, noLead: false, fireFrom: 0, reset: 0.95 }
+export const TUNING = { drops: true, standoff: false, wary: 0, seek: true, brawl: false, pro: true, rush: 25, rushMend: 0, fixedSeed: true, mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true }
 
 interface Track {
   id: number
@@ -286,6 +290,9 @@ export class Brain {
    */
   ffa = false
   private fireFromDone = false
+  private resetKills = 0
+  private resetT = 0
+  private resetting = false
   private wary = false
   private nearFoes = 0
   private killCount = 0
@@ -485,6 +492,20 @@ export class Brain {
     // shooting us or is one hit from dead
     // (two deaths that are not ours, standing for a full second so a late kill credit cannot trip it)
     if (PROBE.survive || PROBE.pacifist) this.ffa = true
+    if (PROBE.reset > 0) {
+      if (this.killCount > this.resetKills) {
+        this.resetKills = this.killCount
+        this.resetT = t
+        this.resetting = true
+      }
+      if (this.resetting && (this.me.hp >= PROBE.reset * this.me.max_hp || t - this.resetT > 45)) {
+        this.resetting = false
+        this.ffa = false
+        this.ffaSince = -1
+        this.foreignHits = 0
+      }
+      if (this.resetting) this.ffa = true
+    }
     if (PROBE.fireFrom > 0) {
       if (t < PROBE.fireFrom) this.ffa = true
       else if (!this.fireFromDone) {
