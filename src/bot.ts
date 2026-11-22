@@ -87,8 +87,10 @@ const STANDOFF = 170
  *   `trigMul`    how far off the lead solution the gun may point and still fire, times this (1 = as
  *                build 5: half the target's width). The magazine empties and reloads on the clock
  *                either way, so a shot held back is a shot lost, not saved.
+ *   `noGun` / `noLaser`  that weapon never fired against house bots: what each one's kills are;
+ *   `noLead`     the gun aimed at where the target is, not where it will be.
  */
-export const PROBE = { survive: false, pacifist: false, noFfa: false, ceaseAt: 0, lightFirst: false, noDuck: false, closeMul: 1, hunt: false, farm: false, trigMul: 1 }
+export const PROBE = { survive: false, pacifist: false, noFfa: false, ceaseAt: 0, lightFirst: false, noDuck: false, closeMul: 1, hunt: false, farm: false, trigMul: 1, noGun: true, noLaser: false, noLead: false }
 export const TUNING = { drops: true, standoff: false, wary: 0, seek: true, brawl: false, pro: true, fixedSeed: true, mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true }
 
 interface Track {
@@ -816,6 +818,11 @@ export class Brain {
 
     // --- torso and triggers
     const aim = this.aimAndFire(act, primary, enemies, hpFrac, label, holdFire)
+    if (!this.ffa && PROBE.noGun && this.gun >= 0) act.fire[this.gun] = false
+    if (!this.ffa && PROBE.noLaser && this.laser >= 0) {
+      act.fire[this.laser] = false
+      this.laserHold = false
+    }
     if (PROBE.pacifist || (PROBE.ceaseAt > 0 && t >= PROBE.ceaseAt)) {
       act.fire = [false, false]
       this.laserHold = false
@@ -2476,9 +2483,10 @@ export class Brain {
       // keeps rising nor simply falls. Against recorded house-bot movement at 170 m that lands 58% of
       // shots, full vertical speed 52%, none 57%; on targets in the air 54% against 37%.)
       const gvz = tr.vz * 0.5
-      const gsol = gw ? this.solve(primary.x, primary.y, primary.cz, tr.vx, tr.vy, gvz, gw.stats.speed, floor, 0.1) : null
+      const gl = !this.ffa && PROBE.noLead ? 0 : 1
+      const gsol = gw ? this.solve(primary.x, primary.y, primary.cz, tr.vx * gl, tr.vy * gl, gvz * gl, gw.stats.speed, floor, 0.1) : null
       const lsol = this.solve(primary.x, primary.y, primary.cz, tr.vx, tr.vy, tr.vz, 0, floor, 0.1)
-      const gnow = gw ? this.solve(primary.x, primary.y, primary.cz, tr.vx, tr.vy, gvz, gw.stats.speed, floor, 0) : null
+      const gnow = gw ? this.solve(primary.x, primary.y, primary.cz, tr.vx * gl, tr.vy * gl, gvz * gl, gw.stats.speed, floor, 0) : null
       const lnow = this.solve(primary.x, primary.y, primary.cz, tr.vx, tr.vy, tr.vz, 0, floor, 0)
       let useLaser = false
       if (lw) {
