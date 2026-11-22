@@ -129,7 +129,7 @@ export const PROBE = { survive: false, pacifist: false, noFfa: false, ceaseAt: 0
  * `ffaFrom` (clock time, 0 = off): practice ends at the cutoff, so a match played after it is the
  * free-for-all and is played survive-only from the first tick.
  */
-export const TUNING = { drops: true, standoff: false, wary: 0, seek: true, brawl: false, pro: true, rush: 0, rushMend: 0, fixedSeed: true, mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true, mortar: true, dodgeBoost: true, farmR: 120, idleStay: true, commit: true, noGlance: true, iso: true, fightLoot: true, plate: true, duel: true, search: true, ffaFrom: Date.UTC(2026, 10, 22, 16, 30) }
+export const TUNING = { drops: true, standoff: false, wary: 0, seek: true, brawl: false, pro: true, rush: 0, rushMend: 0, fixedSeed: true, mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true, mortar: true, dodgeBoost: true, farmR: 120, idleStay: true, commit: true, noGlance: true, iso: true, fightLoot: true, plate: true, duel: true, search: true, stay: true, ffaFrom: Date.UTC(2026, 10, 22, 16, 30) }
 
 interface Track {
   id: number
@@ -708,7 +708,7 @@ export class Brain {
       // being hit by someone we cannot see: sidestep across their line of fire while the torso looks for them
       // If turning to look has not found them within a second they are beyond our sight (a laser
       // out-ranges our eyes): put a building between us and that bearing.
-      const unseen = t - this.ghostT > 1 ? this.hide(primary, [primary], shells, zone, true, 140, 10.5) : null
+      const unseen = t - this.ghostT > 1 && !(TUNING.stay && this.pro()) ? this.hide(primary, [primary], shells, zone, true, 140, 10.5) : null
       if (unseen) {
         mv = unseen
         label = "unseen"
@@ -1383,14 +1383,17 @@ export class Brain {
     if (this.brawling()) return ""
     // (a house bot's beam from beyond 110 m misses nine times in ten: not worth breaking off our own fire for)
     const far = this.far()
+    // (`stay`: nothing takes us out of the fight, not a charging beam and not an empty magazine)
+    const stay = TUNING.stay && this.pro()
     for (const e of threats) {
+      if (stay) break
       if (e.tr.chargeT < 0 || t - e.tr.t > 0.15 || t - e.tr.chargeT < 0.1) continue
       if (far && e.d > 110) continue
       // beam against beam with our own target: keep firing, the duck costs our shot too
       if (TUNING.duel && this.pro() && e === primary && this.laser >= 0) continue
       if (e.seesMe ? Math.abs(wrap(e.tr.aimYaw - (e.yaw + Math.PI))) < 0.3 : e === primary) return "laser"
     }
-    if (weaponsDown && !PROBE.noDuck && !(far && primary.d > 110)) return "reload"
+    if (weaponsDown && !PROBE.noDuck && !stay && !(far && primary.d > 110)) return "reload"
     // committed: the fight is not left to mend or to wait for them behind a wall
     if (TUNING.commit && this.pro()) {
       this.healing = false
