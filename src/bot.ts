@@ -90,7 +90,7 @@ const STANDOFF = 170
  *   `noGun` / `noLaser`  that weapon never fired against house bots: what each one's kills are;
  *   `noLead`     the gun aimed at where the target is, not where it will be.
  */
-export const PROBE = { survive: false, pacifist: false, noFfa: false, ceaseAt: 0, lightFirst: false, noDuck: false, closeMul: 1, hunt: false, farm: false, trigMul: 1, noGun: false, noLaser: false, noLead: true }
+export const PROBE = { survive: false, pacifist: false, noFfa: false, ceaseAt: 0, lightFirst: false, noDuck: false, closeMul: 1, hunt: false, farm: false, trigMul: 1, noGun: false, noLaser: false, noLead: false }
 export const TUNING = { drops: true, standoff: false, wary: 0, seek: true, brawl: false, pro: true, fixedSeed: true, mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true }
 
 interface Track {
