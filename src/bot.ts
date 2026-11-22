@@ -74,7 +74,7 @@ const STANDOFF = 170
  *               nearly dead mech): what staying alive is worth against the squad;
  *   `pacifist`  the same and never a trigger pulled: how many house bots die without us.
  */
-export const PROBE = { survive: false, pacifist: true }
+export const PROBE = { survive: false, pacifist: false }
 export const TUNING = { drops: true, standoff: false, wary: 0, seek: true, brawl: false, pro: true, fixedSeed: true,mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true }
 
 interface Track {
