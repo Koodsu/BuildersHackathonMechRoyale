@@ -129,7 +129,7 @@ export const PROBE = { survive: false, pacifist: false, noFfa: false, ceaseAt: 0
  * `ffaFrom` (clock time, 0 = off): practice ends at the cutoff, so a match played after it is the
  * free-for-all and is played survive-only from the first tick.
  */
-export const TUNING = { drops: true, standoff: false, wary: 0, seek: true, brawl: false, pro: true, rush: 0, rushMend: 0, fixedSeed: true, mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true, mortar: true, dodgeBoost: true, farmR: 120, idleStay: true, commit: true, noGlance: true, iso: true, fightLoot: true, plate: true, duel: true, search: true, ffaFrom: Date.UTC(2026, 10, 22, 16, 30) }
+export const TUNING = { drops: true, standoff: false, wary: 0, seek: true, brawl: false, pro: true, rush: 0, rushMend: 0, fixedSeed: true, mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true, mortar: true, dodgeBoost: true, farmR: 120, idleStay: true, commit: true, noGlance: true, iso: true, fightLoot: true, plate: true, duel: true, search: true, lateHide: 140, ffaFrom: Date.UTC(2026, 10, 22, 16, 30) }
 
 interface Track {
   id: number
@@ -535,6 +535,10 @@ export class Brain {
     // (two deaths that are not ours, standing for a full second so a late kill credit cannot trip it)
     if (PROBE.survive || PROBE.pacifist) this.ffa = true
     if (TUNING.ffaFrom > 0 && Date.now() >= TUNING.ffaFrom) this.ffa = true
+    // Late in a practice match the whole squad is on us and the circle is closing: from here the
+    // points are house bots that die before we do, so stop trading and outlast them (survive-only
+    // play: out of sight, firing only at whoever is on top of us or nearly dead).
+    if (TUNING.lateHide > 0 && !this.ffa && t > 60 && zone.nr <= TUNING.lateHide) this.ffa = true
     if (PROBE.reset > 0) {
       if (this.killCount > this.resetKills) {
         this.resetKills = this.killCount
