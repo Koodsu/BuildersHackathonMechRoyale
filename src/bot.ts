@@ -114,7 +114,7 @@ const STANDOFF = 170
  * four kills in every match from one that makes none in some and many in others, which one average
  * cannot. (House bots that die without us, 0.15 a match with no shot fired, are counted on top.)
  */
-export const PROBE = { survive: false, pacifist: false, noFfa: false, ceaseAt: 0, lightFirst: false, noDuck: false, closeMul: 1, hunt: false, farm: false, trigMul: 1, noGun: false, noLaser: false, noLead: false, fireFrom: 0, reset: 0, ceaseKills: 0 }
+export const PROBE = { survive: false, pacifist: false, noFfa: false, ceaseAt: 0, lightFirst: false, noDuck: false, closeMul: 1, hunt: true, farm: false, trigMul: 1, noGun: false, noLaser: false, noLead: false, fireFrom: 0, reset: 0, ceaseKills: 0 }
 /**
  * Build 7, on build 6's mid-range fight (`rush: 0`). The kill-cap probes showed the first two kills
  * in every match, and every fighting style ends near four: what is missing is the state we are in
@@ -129,7 +129,7 @@ export const PROBE = { survive: false, pacifist: false, noFfa: false, ceaseAt: 0
  * `ffaFrom` (clock time, 0 = off): practice ends at the cutoff, so a match played after it is the
  * free-for-all and is played survive-only from the first tick.
  */
-export const TUNING = { drops: true, standoff: false, wary: 0, seek: true, brawl: false, pro: true, rush: 0, rushMend: 0, fixedSeed: true, mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true, mortar: true, dodgeBoost: true, farmR: 120, idleStay: true, commit: true, noGlance: true, iso: true, fightLoot: true, plate: true, duel: true, search: true, lateHide: 0, stage: true, spare: 2, spareUntil: 150, ffaFrom: Date.UTC(2026, 10, 22, 16, 30) }
+export const TUNING = { drops: true, standoff: false, wary: 0, seek: true, brawl: false, pro: true, rush: 0, rushMend: 0, fixedSeed: true, mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true, mortar: true, dodgeBoost: true, farmR: 120, idleStay: true, commit: true, noGlance: true, iso: true, fightLoot: true, plate: true, duel: true, search: true, lateHide: 0, stage: true, spare: 0, spareUntil: 150, spareBy: "seen" as "seen" | "hit", ffaFrom: Date.UTC(2026, 10, 22, 16, 30) }
 
 interface Track {
   id: number
@@ -361,7 +361,7 @@ export class Brain {
     // Mixed with the clock on purpose: two runs of the same build are then two different samples.
     // (tests pass `entropy` to get the same match twice)
     // (`fixedSeed`: nothing from the clock, so a build can be scored against another on the same matches)
-    let s = ((hello.seed ?? 1) ^ ((hello.entropy ?? (TUNING.fixedSeed ? 0x2f9d6c43 : Date.now())) & 0x7fffffff) ^ ((hello.slot ?? 0) * 7919)) >>> 0
+    let s = ((hello.seed ?? 1) ^ ((hello.entropy ?? (TUNING.fixedSeed ? 0x6a1e83b5 : Date.now())) & 0x7fffffff) ^ ((hello.slot ?? 0) * 7919)) >>> 0
     this.rnd = () => {
       s = (s + 0x6d2b79f5) >>> 0
       let x = Math.imul(s ^ (s >>> 15), 1 | s)
@@ -521,7 +521,7 @@ export class Brain {
     // goes to the latest arrivals, and the earliest ones are left for last. Not one that is on top of
     // us or carries lightning close by, not when we are nearly dead (then any kill is a point), and
     // not once the whole squad is coming anyway.
-    for (const e of enemies) if (!this.hostileT.has(e.tr.id)) this.hostileT.set(e.tr.id, t)
+    for (const e of enemies) if (!this.hostileT.has(e.tr.id) && (TUNING.spareBy === "seen" || e.attacked)) this.hostileT.set(e.tr.id, t)
     const spared = new Set<number>()
     if (TUNING.spare > 0 && this.pro() && this.killCount >= 1 && t < TUNING.spareUntil && hpFrac >= 0.35) {
       const live = enemies.filter((e) => !e.tr.ghost).sort((a, b) => (this.hostileT.get(a.tr.id) ?? t) - (this.hostileT.get(b.tr.id) ?? t))
