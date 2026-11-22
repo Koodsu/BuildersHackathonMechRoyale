@@ -89,9 +89,16 @@ const STANDOFF = 170
  *                either way, so a shot held back is a shot lost, not saved.
  *   `noGun` / `noLaser`  that weapon never fired against house bots: what each one's kills are;
  *   `noLead`     the gun aimed at where the target is, not where it will be.
+ * `rush` (metres, 0 = off): the one way of fighting house bots never scored before. Every mid-range
+ * variant of build 5 scored 4.17 to 4.50 (a kill about every 43 s, some 33 damage a second landed),
+ * so range, cover, weapon and trigger tuning do not move the score: the mid-range gun fight itself
+ * is the limit. Inside 40 m every gun shot lands and a lightning gun needs no aim, so `rush` goes
+ * straight at whatever is in sight, with the jets, and fights from this distance, moving, from the
+ * first second. `rushMend` (share of health, 0 = never): break off below 45% in a losing trade and
+ * mend when nobody is about, instead of fighting on.
  */
 export const PROBE = { survive: false, pacifist: false, noFfa: false, ceaseAt: 0, lightFirst: false, noDuck: false, closeMul: 1, hunt: false, farm: false, trigMul: 1, noGun: false, noLaser: false, noLead: false }
-export const TUNING = { drops: true, standoff: false, wary: 0, seek: true, brawl: false, pro: true, fixedSeed: true, mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true }
+export const TUNING = { drops: true, standoff: false, wary: 0, seek: true, brawl: false, pro: true, rush: 25, rushMend: 0.6, fixedSeed: true, mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true }
 
 interface Track {
   id: number
@@ -575,7 +582,7 @@ export class Brain {
       // played, so break their lines and mend rather than stand in it
       this.retreat = true
       this.retreatT = t
-    } else if (primary && hpFrac < 0.45 && !this.brawling() && !(this.far() && TUNING.mend <= 0)) {
+    } else if (primary && hpFrac < 0.45 && (!this.brawling() || TUNING.rushMend > 0) && !(this.far() && TUNING.mend <= 0)) {
       const mine = me.hp / Math.max(inDps, 40)
       const theirs = primary.tr.hp / Math.max(outDps, 40)
       if (mine < theirs * 0.9) {
@@ -720,7 +727,7 @@ export class Brain {
         const pref = primary.closing > 2 && primary.d > want ? Math.max(want, primary.d - 18) : want
         const c = this.local("fight", primary, threats, pref, shells, zone, 10.5)
         // out-gunned at range with no cover to wait behind: close the distance fast
-        const rush = this.finishing ? primary.d > pref + 20 && me.energy > 25 : why === "ambush" || why === "heal" ? primary.d > pref + 15 && me.energy > 15 : primary.d > pref + 50 && me.energy > 40
+        const rush = this.finishing ? primary.d > pref + 20 && me.energy > 25 : why === "ambush" || why === "heal" ? primary.d > pref + 15 && me.energy > 15 : TUNING.rush > 0 && this.brawling() ? primary.d > pref + 15 && me.energy > (this.light >= 0 ? 45 : 15) : primary.d > pref + 50 && me.energy > 40
         // run while sidestepping when the jets can spare it: a faster target is a harder one. Not
         // when our own lightning needs the energy, and always when theirs is closing on us.
         if (me.energy > 60) this.sprint = true
@@ -755,7 +762,13 @@ export class Brain {
             }
           } else if (primary.shootable && primary.d <= pref + 25 && !this.mortarFoe && !shells.some((sh) => hyp(mx - sh.x, my - sh.y) < sh.r + 3)) mv = still
         }
-        if (this.brawling() && primary.shootable && Math.abs(primary.d - pref) < 30 && !shells.some((sh) => hyp(mx - sh.x, my - sh.y) < sh.r + 3)) mv = still
+        // rush: outside the range we want, no sidestepping on the way in: the straight route, on the jets
+        // (the 40-80 m band, where their guns land more than half their shots, is crossed, not fought in)
+        if (this.brawling() && TUNING.rush > 0 && !this.ring && primary.d > TUNING.rush + 15) {
+          const run = this.travel({ x: primary.x, y: primary.y, stop: TUNING.rush, boost: me.energy > (this.light >= 0 ? 45 : 15), kind: "rush" })
+          if (run) mv = run
+        }
+        if (this.brawling() && !(TUNING.rush > 0) && primary.shootable && Math.abs(primary.d - pref) < 30 && !shells.some((sh) => hyp(mx - sh.x, my - sh.y) < sh.r + 3)) mv = still
         label = "fight"
         // it has gone behind something: go round after it rather than wait for it to come back mended
         if (this.finishing && !this.ring && !primary.shootable && t - this.lastShotT > 0.6) {
@@ -789,9 +802,9 @@ export class Brain {
       if (drop && (hpFrac < (this.far() || this.pro() ? 0.85 : 0.6) || ((me.cubes ?? 0) < CUBE_TARGET && !(this.laser < 0 && this.laserNear(zone, 260))))) {
         mv = this.travel({ x: drop.x, y: drop.y, stop: 1.5, boost: drop.d / 9 > drop.lands && me.energy > 30, kind: "drop" })
         label = "drop"
-      } else if (t < this.holdUntil && !this.far() && !this.brawling()) {
+      } else if (t < this.holdUntil && !this.far() && (!this.brawling() || TUNING.rushMend > 0)) {
         label = "hold" // the hunter we hid from is on its way: stay behind cover, heal, and watch
-      } else if (hpFrac < (this.pro() ? 0.8 : 0.6) && t - this.npcHurtT > 4 && !this.far() && !this.brawling()) {
+      } else if (hpFrac < (this.pro() ? 0.8 : 0.6) && t - this.npcHurtT > 4 && !this.far() && (!this.brawling() || (TUNING.rushMend > 0 && hpFrac < TUNING.rushMend))) {
         // (`pro`: the reset between fights. The next fight is started whole or not at all, and the
         // cubes a kill left are fetched from further off: each one is 4% of our health back at once.)
         // (Not against house bots: they know where we are and come to us, so a hiding place is where
@@ -1333,7 +1346,7 @@ export class Brain {
 
   /** Playing the long-range game: against house bots, which is everything that is not a free-for-all. */
   private far(): boolean {
-    return TUNING.standoff && !TUNING.brawl && !this.ffa
+    return TUNING.standoff && !TUNING.brawl && !(TUNING.rush > 0) && !this.ffa
   }
 
   /**
@@ -1342,12 +1355,12 @@ export class Brain {
    * 30-85 m on the match feed). No cover, no breaking off to mend, everything in sight is a target.
    */
   private brawling(): boolean {
-    return TUNING.brawl && !this.ffa
+    return (TUNING.brawl || TUNING.rush > 0) && !this.ffa
   }
 
   /** Build 5's battle-royale play (see TUNING): the mid-range cover fight, plus finishing, resets and seeking. */
   private pro(): boolean {
-    return TUNING.pro && !TUNING.standoff && !TUNING.brawl && !this.ffa
+    return TUNING.pro && !TUNING.standoff && !TUNING.brawl && !(TUNING.rush > 0) && !this.ffa
   }
 
   private prefRange(e: Enemy): number {
@@ -1360,6 +1373,7 @@ export class Brain {
     if (this.pro() && this.finishing) return this.light >= 0 && me.energy > 15 ? 28 : 38
     // (85 m, standing: what the teams tied at 6.19 do on the match feed, 37 showdowns: median gun
     // range 84 m, standing still 40% of the time, first shot 4 s into the match, no backing off)
+    if (this.brawling() && TUNING.rush > 0) return TUNING.rush
     if (this.brawling()) return this.light >= 0 && me.energy > 15 && e.d < 60 ? 28 : 85
     if (this.light >= 0 && me.energy > 15) return 28
     const k = this.ffa ? 1 : PROBE.closeMul
