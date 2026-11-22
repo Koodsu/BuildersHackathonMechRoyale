@@ -7,7 +7,9 @@ import { readFileSync } from "node:fs"
 import { gunzipSync } from "node:zlib"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
-import { Brain, TUNING } from "../src/bot.ts"
+import { Brain, PROBE, TUNING } from "../src/bot.ts"
+if (process.env.PROBE === "survive") PROBE.survive = true
+if (process.env.PROBE === "pacifist") PROBE.pacifist = true
 
 // switches, to check that the comparison builds do not crash either
 if (process.env.BRAWL) TUNING.brawl = true

@@ -68,7 +68,14 @@ const STANDOFF = 170
  * `fixedSeed`: random choices come from the match's own seed, so one build scores the same on the
  * scorer's fixed matches every time and two builds can be compared (off = mixed with the clock).
  */
-export const TUNING = { drops: true, standoff: false, wary: 0, seek: true, brawl: false, pro: true, fixedSeed: true, mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true }
+/**
+ * Probes, to learn from one practice score each what the house squad's deaths depend on:
+ *   `survive`   free-for-all play from the first tick (stay unseen, fight only an attacker or a
+ *               nearly dead mech): what staying alive is worth against the squad;
+ *   `pacifist`  the same and never a trigger pulled: how many house bots die without us.
+ */
+export const PROBE = { survive: true, pacifist: false }
+export const TUNING = { drops: true, standoff: false, wary: 0, seek: true, brawl: false, pro: true, fixedSeed: true,mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true }
 
 interface Track {
   id: number
@@ -449,6 +456,7 @@ export class Brain {
     // free-for-all: everyone nearby is something to stay away from, and we only shoot at whoever is
     // shooting us or is one hit from dead
     // (two deaths that are not ours, standing for a full second so a late kill credit cannot trip it)
+    if (PROBE.survive || PROBE.pacifist) this.ffa = true
     if (!this.ffa) {
       // (in the first 45 s one is enough: in the recorded top-16 match three bots were dead by 14 s,
       // while a house bot can only die that early by our hand)
@@ -793,6 +801,10 @@ export class Brain {
 
     // --- torso and triggers
     const aim = this.aimAndFire(act, primary, enemies, hpFrac, label, holdFire)
+    if (PROBE.pacifist) {
+      act.fire = [false, false]
+      this.laserHold = false
+    }
     act.move = [mv.x, mv.y]
     act.boost = mv.boost
     act.jump = mv.jump
