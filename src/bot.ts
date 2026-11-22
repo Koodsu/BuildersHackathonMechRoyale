@@ -96,9 +96,12 @@ const STANDOFF = 170
  * straight at whatever is in sight, with the jets, and fights from this distance, moving, from the
  * first second. `rushMend` (share of health, 0 = never): break off below 45% in a losing trade and
  * mend when nobody is about, instead of fighting on.
+ * `fireFrom` (seconds, 0 = off): survive-only play with no trigger pulled until this time, then the
+ * build's normal play. If the kills are only put off (score stays), what stops them is not the
+ * clock but something our own kills set off; if they are lost, the squad closes in on the clock.
  */
-export const PROBE = { survive: false, pacifist: false, noFfa: false, ceaseAt: 0, lightFirst: false, noDuck: false, closeMul: 1, hunt: false, farm: false, trigMul: 1, noGun: false, noLaser: false, noLead: false }
-export const TUNING = { drops: true, standoff: false, wary: 0, seek: true, brawl: false, pro: true, rush: 0, rushMend: 0, fixedSeed: true, mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true }
+export const PROBE = { survive: false, pacifist: false, noFfa: false, ceaseAt: 0, lightFirst: false, noDuck: false, closeMul: 1, hunt: false, farm: false, trigMul: 1, noGun: false, noLaser: false, noLead: false, fireFrom: 60 }
+export const TUNING = { drops: true, standoff: false, wary: 0, seek: true, brawl: false, pro: true, rush: 25, rushMend: 0, fixedSeed: true, mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true }
 
 interface Track {
   id: number
@@ -282,6 +285,7 @@ export class Brain {
    * we stay out of sight and only shoot back.
    */
   ffa = false
+  private fireFromDone = false
   private wary = false
   private nearFoes = 0
   private killCount = 0
@@ -481,6 +485,15 @@ export class Brain {
     // shooting us or is one hit from dead
     // (two deaths that are not ours, standing for a full second so a late kill credit cannot trip it)
     if (PROBE.survive || PROBE.pacifist) this.ffa = true
+    if (PROBE.fireFrom > 0) {
+      if (t < PROBE.fireFrom) this.ffa = true
+      else if (!this.fireFromDone) {
+        this.fireFromDone = true
+        this.ffa = false
+        this.ffaSince = -1
+        this.foreignHits = 0
+      }
+    }
     if (!this.ffa && !PROBE.noFfa) {
       // (in the first 45 s one is enough: in the recorded top-16 match three bots were dead by 14 s,
       // while a house bot can only die that early by our hand)
@@ -836,7 +849,7 @@ export class Brain {
       act.fire[this.laser] = false
       this.laserHold = false
     }
-    if (PROBE.pacifist || (PROBE.ceaseAt > 0 && t >= PROBE.ceaseAt)) {
+    if (PROBE.pacifist || (PROBE.ceaseAt > 0 && t >= PROBE.ceaseAt) || (PROBE.fireFrom > 0 && t < PROBE.fireFrom)) {
       act.fire = [false, false]
       this.laserHold = false
     }
