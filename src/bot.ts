@@ -97,8 +97,8 @@ const STANDOFF = 170
  * first second. `rushMend` (share of health, 0 = never): break off below 45% in a losing trade and
  * mend when nobody is about, instead of fighting on.
  */
-export const PROBE = { survive: false, pacifist: false, noFfa: false, ceaseAt: 0, lightFirst: true, noDuck: false, closeMul: 1, hunt: false, farm: false, trigMul: 1, noGun: false, noLaser: false, noLead: false }
-export const TUNING = { drops: true, standoff: false, wary: 0, seek: true, brawl: false, pro: true, rush: 25, rushMend: 0.6, fixedSeed: true, mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true }
+export const PROBE = { survive: false, pacifist: false, noFfa: false, ceaseAt: 0, lightFirst: false, noDuck: false, closeMul: 1, hunt: false, farm: false, trigMul: 1, noGun: false, noLaser: false, noLead: false }
+export const TUNING = { drops: true, standoff: false, wary: 0, seek: true, brawl: false, pro: true, rush: 40, rushMend: 0.6, fixedSeed: true, mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true }
 
 interface Track {
   id: number
