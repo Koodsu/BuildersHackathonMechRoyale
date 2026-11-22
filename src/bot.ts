@@ -34,7 +34,7 @@ const UPGRADES = [
   "lightning_range", "lightning_chain", "sensors", "laser_pierce", "mortar_reload", "mortar_splash", "mortar_velocity",
 ]
 /** Second-slot weapons we pick up, best first. */
-const WANT = ["laser", "lightning"]
+let WANT = ["laser", "lightning"]
 /**
  * Stop seeking cubes here. The HP and damage bonuses cap at 10, and every cube makes us 5% bigger
  * with no cap. Past 10 the only gain is one upgrade per 5 to 7 cubes (about +15% of one thing),
@@ -73,9 +73,15 @@ const STANDOFF = 170
  *   `survive`   free-for-all play from the first tick (stay unseen, fight only an attacker or a
  *               nearly dead mech): what staying alive is worth against the squad;
  *   `pacifist`  the same and never a trigger pulled: how many house bots die without us.
+ *   `noFfa`      never switch to free-for-all play: with the fixed seed, any change in the score is
+ *                the switch going off in practice matches, where it never should;
+ *   `ceaseAt`    no trigger pulled after this many seconds (0 = off): the score is then the kills made
+ *                by that time, which shows when our kills come and when they stop;
+ *   `lightFirst` the lightning gun wanted ahead of the laser;
+ *   `noDuck`     no leaving the fight for cover while our weapons reload.
  */
-export const PROBE = { survive: false, pacifist: false }
-export const TUNING = { drops: true, standoff: false, wary: 0, seek: true, brawl: false, pro: true, fixedSeed: true,mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true }
+export const PROBE = { survive: false, pacifist: false, noFfa: true, ceaseAt: 0, lightFirst: false, noDuck: false }
+export const TUNING = { drops: true, standoff: false, wary: 0, seek: true, brawl: false, pro: true, fixedSeed: true, mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true }
 
 interface Track {
   id: number
@@ -283,6 +289,7 @@ export class Brain {
 
   constructor(hello: any) {
     this.cfg = hello.config
+    WANT = PROBE.lightFirst ? ["lightning", "laser"] : ["laser", "lightning"]
     // Mixed with the clock on purpose: two runs of the same build are then two different samples.
     // (tests pass `entropy` to get the same match twice)
     // (`fixedSeed`: nothing from the clock, so a build can be scored against another on the same matches)
@@ -457,7 +464,7 @@ export class Brain {
     // shooting us or is one hit from dead
     // (two deaths that are not ours, standing for a full second so a late kill credit cannot trip it)
     if (PROBE.survive || PROBE.pacifist) this.ffa = true
-    if (!this.ffa) {
+    if (!this.ffa && !PROBE.noFfa) {
       // (in the first 45 s one is enough: in the recorded top-16 match three bots were dead by 14 s,
       // while a house bot can only die that early by our hand)
       // (with three kills of our own and no other death so far this is a practice match; a stray
@@ -801,7 +808,7 @@ export class Brain {
 
     // --- torso and triggers
     const aim = this.aimAndFire(act, primary, enemies, hpFrac, label, holdFire)
-    if (PROBE.pacifist) {
+    if (PROBE.pacifist || (PROBE.ceaseAt > 0 && t >= PROBE.ceaseAt)) {
       act.fire = [false, false]
       this.laserHold = false
     }
@@ -812,7 +819,7 @@ export class Brain {
 
     // --- pick up a second weapon when standing on one (a laser also in place of anything but the gun)
     const empty = me.weapons.some((x: any) => !x)
-    const swap = empty || this.laser >= 0 ? -1 : me.weapons.findIndex((x: any) => x && x.kind !== "gun")
+    const swap = empty || (WANT[0] === "laser" ? this.laser : this.light) >= 0 ? -1 : me.weapons.findIndex((x: any) => x && x.kind !== "gun")
     if (empty || swap >= 0) {
       const reach = (cfg.loot?.pickup_radius ?? 4) * 0.95
       let bestRank = empty ? 99 : 1
@@ -1262,7 +1269,7 @@ export class Brain {
       if (far && e.d > 110) continue
       if (e.seesMe ? Math.abs(wrap(e.tr.aimYaw - (e.yaw + Math.PI))) < 0.3 : e === primary) return "laser"
     }
-    if (weaponsDown && !(far && primary.d > 110)) return "reload"
+    if (weaponsDown && !PROBE.noDuck && !(far && primary.d > 110)) return "reload"
     let nearest = Infinity
     for (const e of threats) nearest = Math.min(nearest, e.d)
     // (standing off we take little: keep shooting until half health before breaking off to mend)
@@ -1685,7 +1692,7 @@ export class Brain {
     // 1. a second weapon
     // (the laser is the one that kills at range: go and trade a lightning gun for one seen nearby)
     const empty = me.weapons.some((x: any) => !x)
-    if (quiet && (empty || this.laser < 0)) {
+    if (quiet && (empty || (WANT[0] === "laser" ? this.laser : this.light) < 0)) {
       let best: Item | null = null
       let bestS = Infinity
       for (const p of this.pickups.values()) {

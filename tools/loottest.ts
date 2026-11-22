@@ -11,7 +11,8 @@ import { readFileSync } from "node:fs"
 import { gunzipSync } from "node:zlib"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
-import { Brain, TUNING } from "../src/bot.ts"
+import { Brain, TUNING, PROBE } from "../src/bot.ts"
+if (process.env.PROBE === "lightFirst") PROBE.lightFirst = true
 
 // DROPS=1 switches the bot's supply-drop behaviour on and makes the three drops fall
 if (process.env.DROPS) TUNING.drops = true
