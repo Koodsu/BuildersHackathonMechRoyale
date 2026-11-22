@@ -88,7 +88,7 @@ const STANDOFF = 170
  *                build 5: half the target's width). The magazine empties and reloads on the clock
  *                either way, so a shot held back is a shot lost, not saved.
  */
-export const PROBE = { survive: false, pacifist: false, noFfa: false, ceaseAt: 0, lightFirst: false, noDuck: false, closeMul: 1, hunt: false, farm: false, trigMul: 3 }
+export const PROBE = { survive: false, pacifist: false, noFfa: false, ceaseAt: 0, lightFirst: false, noDuck: false, closeMul: 1, hunt: false, farm: false, trigMul: 50 }
 export const TUNING = { drops: true, standoff: false, wary: 0, seek: true, brawl: false, pro: true, fixedSeed: true, mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true }
 
 interface Track {
