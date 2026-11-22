@@ -17,6 +17,7 @@ if (process.env.PROBE === "noDuck") PROBE.noDuck = true
 if (process.env.PROBE === "close") PROBE.closeMul = 0.5
 if (process.env.PROBE === "hunt") PROBE.hunt = true
 if (process.env.PROBE === "farm") PROBE.farm = true
+if (process.env.PROBE === "trig") PROBE.trigMul = Number(process.env.TRIG ?? 3)
 
 // switches, to check that the comparison builds do not crash either
 if (process.env.BRAWL) TUNING.brawl = true

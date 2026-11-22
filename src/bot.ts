@@ -84,8 +84,11 @@ const STANDOFF = 170
  *   `hunt`       go after any mech in sight or last seen, from 55% health, with or without a second
  *                weapon, from 10 s on: kills between the hunters the squad sends;
  *   `farm`       crates shot and collected from 60% health instead of 90%, and before seeking.
+ *   `trigMul`    how far off the lead solution the gun may point and still fire, times this (1 = as
+ *                build 5: half the target's width). The magazine empties and reloads on the clock
+ *                either way, so a shot held back is a shot lost, not saved.
  */
-export const PROBE = { survive: false, pacifist: false, noFfa: false, ceaseAt: 0, lightFirst: false, noDuck: false, closeMul: 1, hunt: false, farm: false }
+export const PROBE = { survive: false, pacifist: false, noFfa: false, ceaseAt: 0, lightFirst: false, noDuck: false, closeMul: 1, hunt: false, farm: false, trigMul: 3 }
 export const TUNING = { drops: true, standoff: false, wary: 0, seek: true, brawl: false, pro: true, fixedSeed: true, mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true }
 
 interface Track {
@@ -2384,10 +2387,10 @@ export class Brain {
     return { yaw: Math.atan2(dy, dx), pitch: Math.atan2(dz, hyp(dx, dy)), d: hyp(dx, dy, dz) }
   }
 
-  private aligned(sol: Sol, rad: number, hgt: number): boolean {
+  private aligned(sol: Sol, rad: number, hgt: number, mul = 1): boolean {
     const me = this.me
-    const yawTol = Math.atan2(rad, sol.d) * 0.5
-    const pitchTol = Math.atan2(hgt * 0.5, sol.d) * 0.6
+    const yawTol = Math.atan2(rad, sol.d) * 0.5 * mul
+    const pitchTol = Math.atan2(hgt * 0.5, sol.d) * 0.6 * mul
     return Math.abs(wrap(me.aim[0] - sol.yaw)) <= yawTol && Math.abs(me.aim[1] - sol.pitch) <= pitchTol
   }
 
@@ -2501,7 +2504,7 @@ export class Brain {
       }
       const sol = useLaser || !gsol ? lsol : gsol
       aim = [sol.yaw, sol.pitch]
-      if (gw && gnow && gunOk && primary.shootable && this.aligned(gnow, primary.rad + 0.3, primary.hgt)) act.fire[this.gun] = true
+      if (gw && gnow && gunOk && primary.shootable && this.aligned(gnow, primary.rad + 0.3, primary.hgt, this.ffa ? 1 : PROBE.trigMul)) act.fire[this.gun] = true
       if (gw && !act.fire[this.gun] && !(gw.reload > 0) && gw.ammo < gw.stats.mag && t - this.lastShotT > 1.5 && (gw.ammo <= gw.stats.mag * 0.5 || primary.d > 60)) act.reload = true
       // out of our memory for a while: they could come from anywhere, so sweep instead of staring at a wall
       if (t - tr.t > 1.5) return [wrap(this.cmdYaw + 0.24), 0]
