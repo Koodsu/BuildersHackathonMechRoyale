@@ -114,7 +114,21 @@ const STANDOFF = 170
  * cannot. (House bots that die without us, 0.15 a match with no shot fired, are counted on top.)
  */
 export const PROBE = { survive: false, pacifist: false, noFfa: false, ceaseAt: 0, lightFirst: false, noDuck: false, closeMul: 1, hunt: false, farm: false, trigMul: 1, noGun: false, noLaser: false, noLead: false, fireFrom: 0, reset: 0, ceaseKills: 0 }
-export const TUNING = { drops: true, standoff: false, wary: 0, seek: true, brawl: false, pro: true, rush: 25, rushMend: 0, fixedSeed: true, mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true, mortar: true, dodgeBoost: true, farmR: 120, idleStay: true }
+/**
+ * Build 7, on build 6's mid-range fight (`rush: 0`). The kill-cap probes showed the first two kills
+ * in every match, and every fighting style ends near four: what is missing is the state we are in
+ * when several hunters come at once. Four blocks, each a gain other teams measured on the scorer:
+ *   `commit`    no breaking off to mend, no hiding to heal or to wait in ambush, no resting between
+ *               fights; the step behind cover while both weapons reload stays;
+ *   `noGlance`  the torso stays on the target when something we cannot see hits us;
+ *   `iso`       fight spots are scored against every mech seen in the last 8 s within 170 m, not
+ *               only the four we track, and searched on a third ring 16 m out;
+ *   `fightLoot` a second weapon within 60 m, or a cube within 35 m, is walked onto in mid-fight
+ *               with the torso still firing.
+ * `ffaFrom` (clock time, 0 = off): practice ends at the cutoff, so a match played after it is the
+ * free-for-all and is played survive-only from the first tick.
+ */
+export const TUNING = { drops: true, standoff: false, wary: 0, seek: true, brawl: false, pro: true, rush: 0, rushMend: 0, fixedSeed: true, mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true, mortar: true, dodgeBoost: true, farmR: 120, idleStay: true, commit: true, noGlance: true, iso: true, fightLoot: true, ffaFrom: Date.UTC(2026, 10, 22, 16, 30) }
 
 interface Track {
   id: number
@@ -280,6 +294,10 @@ export class Brain {
   private lastHurtBy = -1
   private strangerT = -99
   private strangerYaw = 0
+  private flWatch: { x: number; y: number; best: number; t: number } | null = null
+  private lobT = -1
+  private lobSeenT = -99
+  private lobSkipT = -99
   private glanceUntil = -99
   private glanceYaw = 0
   private glanceNextT = -99
@@ -508,6 +526,7 @@ export class Brain {
     // shooting us or is one hit from dead
     // (two deaths that are not ours, standing for a full second so a late kill credit cannot trip it)
     if (PROBE.survive || PROBE.pacifist) this.ffa = true
+    if (TUNING.ffaFrom > 0 && Date.now() >= TUNING.ffaFrom) this.ffa = true
     if (PROBE.reset > 0) {
       if (this.killCount > this.resetKills) {
         this.resetKills = this.killCount
@@ -627,12 +646,12 @@ export class Brain {
     outDps /= 4
     if (this.retreat) {
       if (hpFrac > 0.85 || t - this.retreatT > 25 || !primary) this.retreat = false
-    } else if (primary && hpFrac < 0.6 && this.pro() && !this.finishing && threats.filter((e) => e.seesMe && e.d < 150).length >= 2) {
+    } else if (primary && hpFrac < 0.6 && this.pro() && !TUNING.commit && !this.finishing && threats.filter((e) => e.seesMe && e.d < 150).length >= 2) {
       // two or more with a line on us and we are already hurt: that trade is lost however it is
       // played, so break their lines and mend rather than stand in it
       this.retreat = true
       this.retreatT = t
-    } else if (primary && hpFrac < 0.45 && (!this.brawling() || TUNING.rushMend > 0) && !(this.far() && TUNING.mend <= 0)) {
+    } else if (primary && hpFrac < 0.45 && (!this.brawling() || TUNING.rushMend > 0) && !(this.far() && TUNING.mend <= 0) && !(TUNING.commit && this.pro())) {
       const mine = me.hp / Math.max(inDps, 40)
       const theirs = primary.tr.hp / Math.max(outDps, 40)
       if (mine < theirs * 0.9) {
@@ -825,6 +844,15 @@ export class Brain {
           mv = this.travel({ x: primary.x, y: primary.y, stop: 30, boost: me.energy > 30, kind: "hunt" })
           label = "hunt"
         }
+        // A second weapon or a cube a few steps away: walk onto it now, with the torso still on
+        // the target. A cube is 4% of our health back at once, and the gun alone is half a fight.
+        if (TUNING.fightLoot && this.pro() && label === "fight" && !this.ring && !shells.some((sh) => hyp(mx - sh.x, my - sh.y) < sh.r + 3)) {
+          const lg = this.lootNear(zone, threats, primary)
+          if (lg) {
+            mv = this.travel(lg)
+            label = lg.kind
+          }
+        }
         // Still without a laser, one lying within reach, and nobody close: fetch it now, shooting as
         // we go. From this range it triples what we deal.
         if (far && this.laser < 0 && nearT > 80 && !this.ring) {
@@ -852,9 +880,9 @@ export class Brain {
       if (drop && (hpFrac < (this.far() || this.pro() ? 0.85 : 0.6) || ((me.cubes ?? 0) < CUBE_TARGET && !(this.laser < 0 && this.laserNear(zone, 260))))) {
         mv = this.travel({ x: drop.x, y: drop.y, stop: 1.5, boost: drop.d / 9 > drop.lands && me.energy > 30, kind: "drop" })
         label = "drop"
-      } else if (t < this.holdUntil && !this.far() && (!this.brawling() || TUNING.rushMend > 0)) {
+      } else if (t < this.holdUntil && !this.far() && (!this.brawling() || TUNING.rushMend > 0) && !(TUNING.commit && this.pro())) {
         label = "hold" // the hunter we hid from is on its way: stay behind cover, heal, and watch
-      } else if (hpFrac < (this.pro() ? 0.8 : 0.6) && t - this.npcHurtT > 4 && !this.far() && (!this.brawling() || (TUNING.rushMend > 0 && hpFrac < TUNING.rushMend))) {
+      } else if (hpFrac < (this.pro() ? 0.8 : 0.6) && t - this.npcHurtT > 4 && !this.far() && (!this.brawling() || (TUNING.rushMend > 0 && hpFrac < TUNING.rushMend)) && !(TUNING.commit && this.pro())) {
         // (`pro`: the reset between fights. The next fight is started whole or not at all, and the
         // cubes a kill left are fetched from further off: each one is 4% of our health back at once.)
         // (Not against house bots: they know where we are and come to us, so a hiding place is where
@@ -1350,6 +1378,12 @@ export class Brain {
       if (e.seesMe ? Math.abs(wrap(e.tr.aimYaw - (e.yaw + Math.PI))) < 0.3 : e === primary) return "laser"
     }
     if (weaponsDown && !PROBE.noDuck && !(far && primary.d > 110)) return "reload"
+    // committed: the fight is not left to mend or to wait for them behind a wall
+    if (TUNING.commit && this.pro()) {
+      this.healing = false
+      this.ambush = false
+      return ""
+    }
     let nearest = Infinity
     for (const e of threats) nearest = Math.min(nearest, e.d)
     // (standing off we take little: keep shooting until half health before breaking off to mend)
@@ -1501,7 +1535,27 @@ export class Brain {
     const Y: number[] = []
     const EP: boolean[] = []
     const EO: number[] = []
-    const last = maxR >= 10 ? 32 : 16
+    const iso = TUNING.iso && mode === "fight" && this.pro()
+    const last = maxR >= 10 ? (iso ? 48 : 32) : 16
+    // every mech seen lately that could have a line on a spot, beyond the few we track as threats
+    const extra: { x: number; y: number; mz: number }[] = []
+    if (iso) {
+      const cfg = this.cfg
+      const known = new Set<number>()
+      for (const e of threats) known.add(e.tr.id)
+      const near: { x: number; y: number; mz: number; d: number }[] = []
+      for (const tr of this.tracks.values()) {
+        if (tr.npc || tr.ghost || known.has(tr.id) || this.t - tr.t > 8) continue
+        const lead = Math.min(this.t - tr.t, 1)
+        const x = tr.x + tr.vx * lead
+        const y = tr.y + tr.vy * lead
+        const d = hyp(x - mx, y - my)
+        if (d > 170) continue
+        near.push({ x, y, mz: tr.z + cfg.mech.muzzle_height * (1 + (cfg.cubes?.size_per_cube ?? 0.05) * tr.cubes), d })
+      }
+      near.sort((a, b) => a.d - b.d)
+      for (const n of near.slice(0, 5)) extra.push(n)
+    }
     // standing on a roof (or anything else off the walkable grid): move along the same level
     const onRoof = w.bld[w.idx(mx, my)] === 1 && Math.abs(this.me.pos[2] - w.surface(mx, my)) < 1.5
     let open = 0
@@ -1510,7 +1564,7 @@ export class Brain {
       let cy = my
       if (k >= 0) {
         const ang = (k % 16) * (TAU / 16) + phase
-        const r = k < 16 ? 5 : 10
+        const r = k < 16 ? 5 : k < 32 ? 10 : 16
         cx = mx + Math.cos(ang) * r
         cy = my + Math.sin(ang) * r
         if (onRoof ? !this.levelLine(mx, my, cx, cy) : !this.nav.lineWalkable(mx, my, cx, cy, 0.3)) continue
@@ -1524,6 +1578,7 @@ export class Brain {
         if (e === primary) expP = vis
         else if (vis) expO++
       }
+      for (const e of extra) if (w.los(e.x, e.y, e.mz, cx, cy, cz + this.H * 0.5) || w.los(e.x, e.y, e.mz, cx, cy, cz + this.H * 0.92)) expO++
       X.push(cx)
       Y.push(cy)
       EP.push(expP)
@@ -1722,6 +1777,58 @@ export class Brain {
     }
     if (this.cover) return this.travel({ x: this.cover.x, y: this.cover.y, stop: 1, boost: b, kind: "cover" })
     return null
+  }
+
+  /**
+   * Something worth stepping onto in the middle of a fight: a wanted weapon within 60 m while a
+   * slot is empty (or a laser while we hold none), else a cube within 35 m while cubes still add
+   * health and damage. On the ground, inside the circle, and not at the feet of one of them. One
+   * that gets no nearer for 6 s is left alone for half a minute.
+   */
+  private lootNear(zone: any, threats: Enemy[], primary: Enemy): Goal | null {
+    const me = this.me
+    const [mx, my] = me.pos as number[]
+    const t = this.t
+    const clearOf = (x: number, y: number, r: number) => hyp(primary.x - x, primary.y - y) >= r && !threats.some((e) => hyp(e.x - x, e.y - y) < r)
+    let best: Goal | null = null
+    let bd = Infinity
+    const empty = me.weapons.some((x: any) => !x)
+    if (empty || this.laser < 0) {
+      for (const p of this.pickups.values()) {
+        const rank = WANT.indexOf(p.kind)
+        if (rank < 0 || this.ignore.has(p.id) || (!empty && rank > 0) || this.barred(p.x, p.y)) continue
+        if (p.z - this.w.ground(p.x, p.y) >= 2.5) continue
+        const d = hyp(p.x - mx, p.y - my)
+        if (d > 60 || d + rank * 40 >= bd || !this.reachable(p) || !this.zoneOk(zone, p.x, p.y) || !clearOf(p.x, p.y, 30)) continue
+        bd = d + rank * 40
+        best = { x: p.x, y: p.y, stop: 1.5, boost: false, kind: "weapon" }
+      }
+    }
+    if (!best && (me.cubes ?? 0) < CUBE_TARGET) {
+      for (const c of this.cubes.values()) {
+        const d = hyp(c.x - mx, c.y - my)
+        if (d > 35 || d >= bd || this.barred(c.x, c.y) || !this.reachable(c) || !this.zoneOk(zone, c.x, c.y) || !clearOf(c.x, c.y, 20)) continue
+        bd = d
+        best = { x: c.x, y: c.y, stop: 0.5, boost: false, kind: "cube" }
+      }
+    }
+    if (!best) {
+      this.flWatch = null
+      return null
+    }
+    const d = hyp(best.x - mx, best.y - my)
+    const fw = this.flWatch
+    if (!fw || hyp(fw.x - best.x, fw.y - best.y) > 3) this.flWatch = { x: best.x, y: best.y, best: d, t }
+    else if (d < fw.best - 3) {
+      fw.best = d
+      fw.t = t
+    } else if (t - fw.t > 6) {
+      this.bars = this.bars.filter((b) => t < b.until)
+      this.bars.push({ x: best.x, y: best.y, until: t + 30 })
+      this.flWatch = null
+      return null
+    }
+    return best
   }
 
   /** Can we walk to it? With `roofOk`, also: is it on a roof low enough to jet onto from walkable ground? */
@@ -2573,7 +2680,7 @@ export class Brain {
       // Hit by someone we have no fresh sight of, or heard someone close where we know of nobody:
       // turn and look, once every few seconds. The retreat can only keep away from those we know
       // of, and a hit from behind does half as much again.
-      if (t >= this.glanceNextT && !this.ffa) {
+      if (t >= this.glanceNextT && !this.ffa && !TUNING.noGlance) {
         let yaw: number | null = null
         const by = this.tracks.get(this.lastHurtBy)
         if (t - this.lastHurtT < 0.6 && this.lastHurtBy !== primary.tr.id && (!by || by.ghost || t - by.t > 1.5)) yaw = this.lastHurtYaw
@@ -2667,12 +2774,24 @@ export class Brain {
       // and comes back to the gun. Shells are sent only at someone we can see, far enough off that
       // the blast does not reach us.
       const mw = this.mortar >= 0 ? me.weapons[this.mortar] : null
-      if (mw && primary.shootable && mw.cooldown <= 0.25) {
+      // (given up after 0.7 s on one attempt, for a second: a target crossing fast is never lined
+      // up, and the gun says nothing while the torso is on the lob)
+      if (mw && primary.shootable && mw.cooldown <= 0.25 && t >= this.lobSkipT) {
         const ms = this.lob(primary, mw.stats)
         if (ms) {
-          aim = [ms.yaw, ms.pitch]
-          const yawTol = Math.atan2(Math.max(2, primary.rad * 0.8), ms.d)
-          if (mw.cooldown <= 0.05 && Math.abs(wrap(me.aim[0] - ms.yaw)) <= yawTol && Math.abs(me.aim[1] - ms.pitch) <= ms.pitchTol) act.fire[this.mortar] = true
+          if (this.lobT < 0 || t - this.lobSeenT > 0.25) this.lobT = t
+          this.lobSeenT = t
+          if (t - this.lobT > 0.7) {
+            this.lobSkipT = t + 1
+            this.lobT = -1
+          } else {
+            aim = [ms.yaw, ms.pitch]
+            const yawTol = Math.atan2(Math.max(2, primary.rad * 0.8), ms.d)
+            if (mw.cooldown <= 0.05 && Math.abs(wrap(me.aim[0] - ms.yaw)) <= yawTol && Math.abs(me.aim[1] - ms.pitch) <= ms.pitchTol) {
+              act.fire[this.mortar] = true
+              this.lobT = -1
+            }
+          }
         }
       }
       if (gw && gnow && gunOk && primary.shootable && this.aligned(gnow, primary.rad + 0.3, primary.hgt, this.ffa ? 1 : PROBE.trigMul)) act.fire[this.gun] = true

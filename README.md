@@ -47,6 +47,15 @@ The bot cannot see who its opponents are, so it works out which kind of match it
 
 **Opening (first 26 s, or until our first kill).** The kind of match is not known yet: collect a second weapon and cubes, fire at nobody who is not on us, and keep away from mechs that are close or facing us. Someone who fires at us, or walks at us with guns on us, is fought the long-range way at once.
 
+**Build 7 (2026-11-22; switches `commit`, `noGlance`, `iso`, `fightLoot`, `ffaFrom` in `TUNING`).** On build 6's mid-range fight. Three probes that stop firing after one, two and four kills showed a first and a second kill in every practice match, so the opening is sound and what is missing is how we stand when several hunters come at once. Four blocks, scored together because one practice score cannot show a gain under about half a point:
+
+- Committed: the fight is not left to mend, to heal behind a wall or to wait in ambush, and there is no resting between fights. The step behind cover while both weapons reload stays, and so does ducking a charging laser.
+- The torso stays on the target when something we cannot see hits us.
+- Fight spots are scored against every mech seen in the last 8 s within 170 m (before: the four nearest we track), and searched on a third ring 16 m out.
+- A second weapon within 60 m, or a cube within 35 m, is walked onto in mid-fight with the torso still firing.
+
+Also: the mortar aim is given up after 0.7 s on a target that will not line up, so the gun is not kept silent; and a match played after the practice cutoff is played survive-only from the first tick (`ffaFrom`).
+
 **Build 6 (2026-11-22; switches `mortar`, `dodgeBoost`, `farmR`, `idleStay` in `TUNING`).** Four changes on top of build 5, each one something other teams' published notes report as measured on the practice scorer; none has a score of ours yet. Two commits carry them: one with build 5's mid-range fight (`rush: 0`), one with probe Q's fight (`rush: 25`, close to 25 m and never break off: our best score so far, 4.60).
 
 - The laser is let go when it is full, also after the faster-capacitor upgrade. The charge we are shown is rounded to two decimals (0.56 for a full 0.5625 s), which the old comparison never passed, so the beam stayed held until it fired by itself two seconds later, at half walking speed all the while. `tools/aimtest.ts` now shows it: 5 beams in 20 s before, 9 after.
