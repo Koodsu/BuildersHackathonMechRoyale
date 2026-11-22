@@ -57,7 +57,18 @@ const NAV_CUBES = 30
  */
 const STANDOFF = 170
 /** Switches for behaviours we may want to score separately. */
-export const TUNING = { drops: true, standoff: true, wary: 0, seek: true, brawl: true, mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true }
+/**
+ * Build 5 (`pro`): play it the way good battle-royale players do, on top of the mid-range cover
+ * fighting of build 2 (the best practice score so far), with the long-range and stand-still games off.
+ *   - take the fights we are favoured in, from cover, and finish them: a mech that walks off nearly
+ *     dead comes back mended, so it is closed on and followed;
+ *   - reset between fights: no new fight below 80% health, and the kill's cubes first (each is health);
+ *   - no idle time while whole: go to where a mech was last seen instead of waiting for it;
+ *   - never trade with two at once while hurt: break their lines and mend.
+ * `fixedSeed`: random choices come from the match's own seed, so one build scores the same on the
+ * scorer's fixed matches every time and two builds can be compared (off = mixed with the clock).
+ */
+export const TUNING = { drops: true, standoff: false, wary: 0, seek: true, brawl: false, pro: true, fixedSeed: true, mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true }
 
 interface Track {
   id: number
@@ -267,7 +278,8 @@ export class Brain {
     this.cfg = hello.config
     // Mixed with the clock on purpose: two runs of the same build are then two different samples.
     // (tests pass `entropy` to get the same match twice)
-    let s = ((hello.seed ?? 1) ^ ((hello.entropy ?? Date.now()) & 0x7fffffff) ^ ((hello.slot ?? 0) * 7919)) >>> 0
+    // (`fixedSeed`: nothing from the clock, so a build can be scored against another on the same matches)
+    let s = ((hello.seed ?? 1) ^ ((hello.entropy ?? (TUNING.fixedSeed ? 0x2545f491 : Date.now())) & 0x7fffffff) ^ ((hello.slot ?? 0) * 7919)) >>> 0
     this.rnd = () => {
       s = (s + 0x6d2b79f5) >>> 0
       let x = Math.imul(s ^ (s >>> 15), 1 | s)
@@ -513,7 +525,7 @@ export class Brain {
     // (45% of the time on the match feed) and a quarter of those get back above 60%: 45 HP/s returns
     // after 5 quiet seconds. A kill that walks off behind a building is not a kill, so a nearly dead
     // one is closed on and followed, while we are healthy and none of its friends is near.
-    this.finishing = this.far() && !!primary && !primary.tr.ghost && primary.tr.hp < 0.4 * primary.tr.maxHp && hpFrac >= 0.5 && !threats.some((e) => e !== primary && e.d < 110)
+    this.finishing = (this.far() || this.pro()) && !!primary && !primary.tr.ghost && primary.tr.hp < 0.4 * primary.tr.maxHp && hpFrac >= 0.5 && !threats.some((e) => e !== primary && e.d < 110)
     if (this.finishing) this.rangeNow = 85
     this.primaryId = primary ? primary.tr.id : -1
     // how long the enemy we are dealing with has been one we cannot see
@@ -533,6 +545,11 @@ export class Brain {
     outDps /= 4
     if (this.retreat) {
       if (hpFrac > 0.85 || t - this.retreatT > 25 || !primary) this.retreat = false
+    } else if (primary && hpFrac < 0.6 && this.pro() && !this.finishing && threats.filter((e) => e.seesMe && e.d < 150).length >= 2) {
+      // two or more with a line on us and we are already hurt: that trade is lost however it is
+      // played, so break their lines and mend rather than stand in it
+      this.retreat = true
+      this.retreatT = t
     } else if (primary && hpFrac < 0.45 && !this.brawling() && !(this.far() && TUNING.mend <= 0)) {
       const mine = me.hp / Math.max(inDps, 40)
       const theirs = primary.tr.hp / Math.max(outDps, 40)
@@ -744,12 +761,14 @@ export class Brain {
       // (a laser we know of comes before a drop's three cubes: it is most of what we deal from range)
       // (and against house bots a drop is the quick way to be whole again between waves: four seconds
       // in its ring against twenty of walking it off)
-      if (drop && (hpFrac < (this.far() ? 0.85 : 0.6) || ((me.cubes ?? 0) < CUBE_TARGET && !(this.laser < 0 && this.laserNear(zone, 260))))) {
+      if (drop && (hpFrac < (this.far() || this.pro() ? 0.85 : 0.6) || ((me.cubes ?? 0) < CUBE_TARGET && !(this.laser < 0 && this.laserNear(zone, 260))))) {
         mv = this.travel({ x: drop.x, y: drop.y, stop: 1.5, boost: drop.d / 9 > drop.lands && me.energy > 30, kind: "drop" })
         label = "drop"
       } else if (t < this.holdUntil && !this.far() && !this.brawling()) {
         label = "hold" // the hunter we hid from is on its way: stay behind cover, heal, and watch
-      } else if (hpFrac < 0.6 && t - this.npcHurtT > 4 && !this.far() && !this.brawling()) {
+      } else if (hpFrac < (this.pro() ? 0.8 : 0.6) && t - this.npcHurtT > 4 && !this.far() && !this.brawling()) {
+        // (`pro`: the reset between fights. The next fight is started whole or not at all, and the
+        // cubes a kill left are fetched from further off: each one is 4% of our health back at once.)
         // (Not against house bots: they know where we are and come to us, so a hiding place is where
         // they turn up at arm's length. There we keep walking, which costs the repair nothing, to an
         // open look-out away from where they were last seen, and meet them at range again.)
@@ -757,7 +776,7 @@ export class Brain {
         // still makes no sound. Walking on at this health only finds the next fight sooner. Cubes
         // and a weapon within a few steps are still worth the walk (a cube is health too).
         const g = this.chooseGoal(zone, hpFrac)
-        if ((g.kind === "cube" || g.kind === "weapon") && hyp(g.x - mx, g.y - my) < 45) {
+        if ((g.kind === "cube" || g.kind === "weapon") && hyp(g.x - mx, g.y - my) < (this.pro() ? 80 : 45)) {
           mv = this.travel(g)
           label = g.kind
         } else label = "rest"
@@ -1292,11 +1311,19 @@ export class Brain {
     return TUNING.brawl && !this.ffa
   }
 
+  /** Build 5's battle-royale play (see TUNING): the mid-range cover fight, plus finishing, resets and seeking. */
+  private pro(): boolean {
+    return TUNING.pro && !TUNING.standoff && !TUNING.brawl && !this.ffa
+  }
+
   private prefRange(e: Enemy): number {
     const me = this.me
     const theyLaser = e.tr.weapons.includes("laser")
     const theyLight = e.tr.weapons.includes("lightning")
     if (this.far()) return this.rangeNow
+    // finishing one that is nearly dead and backing off: close enough that every gun shot lands
+    // (inside 40 m; 28 m with a lightning gun, which needs no aim at all)
+    if (this.pro() && this.finishing) return this.light >= 0 && me.energy > 15 ? 28 : 38
     // (85 m, standing: what the teams tied at 6.19 do on the match feed, 37 showdowns: median gun
     // range 84 m, standing still 40% of the time, first shot 4 s into the match, no backing off)
     if (this.brawling()) return this.light >= 0 && me.energy > 15 && e.d < 60 ? 28 : 85
@@ -1685,9 +1712,12 @@ export class Brain {
     // 3. Against house bots the clock is theirs (the whole squad comes late on, grown): with nobody
     // in sight, healthy and armed, go to where one was last seen rather than wait for it. A kill is a
     // point and at least two cubes, so this comes before crates.
-    if (TUNING.seek && !this.wary && (this.brawling() ? hpFrac >= 0.5 : this.far() && hpFrac >= 0.7 && (this.laser >= 0 || (me.cubes ?? 0) >= 4))) {
+    // (`pro`: whole, with both weapons in hand, and past the opening half minute, which is for looting
+    // and in a free-for-all is when the first death tells us what kind of match this is)
+    const proSeek = this.pro() && hpFrac >= 0.8 && !empty && (t > 25 || this.killCount > 0)
+    if (TUNING.seek && !this.wary && (proSeek || (this.brawling() ? hpFrac >= 0.5 : this.far() && hpFrac >= 0.7 && (this.laser >= 0 || (me.cubes ?? 0) >= 4)))) {
       const q = this.quarry(zone)
-      if (q) return { x: q.x, y: q.y, stop: this.brawling() || (q as any).low ? 40 : STANDOFF - 10, boost: false, kind: "seek" }
+      if (q) return { x: q.x, y: q.y, stop: this.brawling() || (q as any).low ? 40 : proSeek ? 70 : STANDOFF - 10, boost: false, kind: "seek" }
     }
     // 4. crates, when healthy enough that shooting does not cost us healing
     if (hpFrac >= 0.9 && (me.cubes ?? 0) < cubeGoal && (!this.wary || this.nearFoes === 0 || (!this.ffa && this.nearFoeD >= 150))) {
