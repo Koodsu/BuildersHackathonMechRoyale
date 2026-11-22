@@ -129,7 +129,7 @@ export const PROBE = { survive: false, pacifist: false, noFfa: false, ceaseAt: 0
  * `ffaFrom` (clock time, 0 = off): practice ends at the cutoff, so a match played after it is the
  * free-for-all and is played survive-only from the first tick.
  */
-export const TUNING = { drops: true, standoff: false, wary: 0, seek: true, brawl: false, pro: true, rush: 0, rushMend: 0, fixedSeed: true, mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true, mortar: true, dodgeBoost: true, farmR: 120, idleStay: true, commit: true, noGlance: true, iso: true, fightLoot: true, plate: true, duel: true, search: true, lateHide: 0, stage: true, ffaFrom: Date.UTC(2026, 10, 22, 16, 30) }
+export const TUNING = { drops: true, standoff: false, wary: 0, seek: true, brawl: false, pro: true, rush: 0, rushMend: 0, fixedSeed: true, mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true, mortar: true, dodgeBoost: true, farmR: 120, idleStay: true, commit: true, noGlance: true, iso: true, fightLoot: true, plate: true, duel: true, search: true, lateHide: 0, stage: true, spare: 2, spareUntil: 150, ffaFrom: Date.UTC(2026, 10, 22, 16, 30) }
 
 interface Track {
   id: number
@@ -243,6 +243,8 @@ export class Brain {
   // memory
   private tracks = new Map<number, Track>()
   private attackT = new Map<number, number>()
+  /** when each mech first came for us (first time it counted as an enemy) */
+  private hostileT = new Map<number, number>()
   private hitT = new Map<number, number>()
   private pickups = new Map<number, Item>()
   private crates = new Map<number, Item>()
@@ -359,7 +361,7 @@ export class Brain {
     // Mixed with the clock on purpose: two runs of the same build are then two different samples.
     // (tests pass `entropy` to get the same match twice)
     // (`fixedSeed`: nothing from the clock, so a build can be scored against another on the same matches)
-    let s = ((hello.seed ?? 1) ^ ((hello.entropy ?? (TUNING.fixedSeed ? 0x51c7e2a9 : Date.now())) & 0x7fffffff) ^ ((hello.slot ?? 0) * 7919)) >>> 0
+    let s = ((hello.seed ?? 1) ^ ((hello.entropy ?? (TUNING.fixedSeed ? 0x2f9d6c43 : Date.now())) & 0x7fffffff) ^ ((hello.slot ?? 0) * 7919)) >>> 0
     this.rnd = () => {
       s = (s + 0x6d2b79f5) >>> 0
       let x = Math.imul(s ^ (s >>> 15), 1 | s)
@@ -514,8 +516,25 @@ export class Brain {
     const threats = enemies.filter((e) => !e.tr.ghost).slice(0, 4)
     let primary: Enemy | null = null
     let bestScore = Infinity
+    // The squad sends its weakest living bots, one more for every kill we make. So the ones that came
+    // for us first are the poor shots, and each of them left alive keeps a better shot at home: fire
+    // goes to the latest arrivals, and the earliest ones are left for last. Not one that is on top of
+    // us or carries lightning close by, not when we are nearly dead (then any kill is a point), and
+    // not once the whole squad is coming anyway.
+    for (const e of enemies) if (!this.hostileT.has(e.tr.id)) this.hostileT.set(e.tr.id, t)
+    const spared = new Set<number>()
+    if (TUNING.spare > 0 && this.pro() && this.killCount >= 1 && t < TUNING.spareUntil && hpFrac >= 0.35) {
+      const live = enemies.filter((e) => !e.tr.ghost).sort((a, b) => (this.hostileT.get(a.tr.id) ?? t) - (this.hostileT.get(b.tr.id) ?? t))
+      const n = Math.min(TUNING.spare, live.length - 1)
+      for (let i = 0; i < n; i++) {
+        const e = live[i]
+        if (e.d < 35 || (e.d < 70 && e.tr.weapons.includes("lightning")) || e.tr.hp < 0.25 * e.tr.maxHp) continue
+        spared.add(e.tr.id)
+      }
+    }
     for (const e of enemies) {
       let s = e.tr.hp / Math.max(20, this.myDpsAt(e, e.d))
+      if (spared.has(e.tr.id)) s += 60
       // against house bots the near one is the one that hurts: their aim falls apart with distance
       if (this.far()) {
         // (but a kill in the hand first: one we can shoot that is down to a third of its health is
@@ -1095,6 +1114,7 @@ export class Brain {
         this.lastSeen.delete(e.target)
         this.tracks.delete(e.target)
         this.attackT.delete(e.target)
+        this.hostileT.delete(e.target)
       } else if (e.type === "took") this.pickups.delete(e.id)
       else if (e.type === "dropped") this.ignore.add(e.id)
       else if (e.type === "take_failed") {
