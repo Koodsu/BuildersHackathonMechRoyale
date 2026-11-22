@@ -114,7 +114,7 @@ const STANDOFF = 170
  * four kills in every match from one that makes none in some and many in others, which one average
  * cannot. (House bots that die without us, 0.15 a match with no shot fired, are counted on top.)
  */
-export const PROBE = { survive: false, pacifist: false, noFfa: false, ceaseAt: 0, lightFirst: false, noDuck: false, closeMul: 1, hunt: true, farm: false, trigMul: 1, noGun: false, noLaser: false, noLead: false, fireFrom: 0, reset: 0, ceaseKills: 0 }
+export const PROBE = { survive: false, pacifist: false, noFfa: false, ceaseAt: 0, lightFirst: false, noDuck: false, closeMul: 1, hunt: false, farm: false, trigMul: 1, noGun: false, noLaser: false, noLead: false, fireFrom: 0, reset: 0, ceaseKills: 0 }
 /**
  * Build 7, on build 6's mid-range fight (`rush: 0`). The kill-cap probes showed the first two kills
  * in every match, and every fighting style ends near four: what is missing is the state we are in
@@ -129,7 +129,7 @@ export const PROBE = { survive: false, pacifist: false, noFfa: false, ceaseAt: 0
  * `ffaFrom` (clock time, 0 = off): practice ends at the cutoff, so a match played after it is the
  * free-for-all and is played survive-only from the first tick.
  */
-export const TUNING = { drops: true, standoff: false, wary: 0, seek: true, brawl: false, pro: true, rush: 0, rushMend: 0, fixedSeed: true, mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true, mortar: true, dodgeBoost: true, farmR: 120, idleStay: true, commit: true, noGlance: true, iso: true, fightLoot: true, plate: true, duel: true, search: true, lateHide: 0, stage: true, spare: 2, spareUntil: 150, spareBy: "hit" as "seen" | "hit", ffaFrom: Date.UTC(2026, 10, 22, 16, 30) }
+export const TUNING = { drops: true, standoff: false, wary: 0, seek: true, brawl: false, pro: true, rush: 0, rushMend: 0, fixedSeed: true, mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true, mortar: true, dodgeBoost: true, farmR: 120, idleStay: true, commit: true, noGlance: true, iso: true, fightLoot: true, plate: true, duel: true, search: true, lateHide: 0, stage: true, spare: 0, spareUntil: 150, spareBy: "hit" as "seen" | "hit", dropFight: true, ffaFrom: Date.UTC(2026, 10, 22, 16, 30) }
 
 interface Track {
   id: number
@@ -245,6 +245,9 @@ export class Brain {
   private attackT = new Map<number, number>()
   /** when each mech first came for us (first time it counted as an enemy) */
   private hostileT = new Map<number, number>()
+  /** supply drops given up on for a while (stood in the ring and the capture never came), by id */
+  private dropSkip = new Map<number, number>()
+  private ringT = -1
   private hitT = new Map<number, number>()
   private pickups = new Map<number, Item>()
   private crates = new Map<number, Item>()
@@ -361,7 +364,7 @@ export class Brain {
     // Mixed with the clock on purpose: two runs of the same build are then two different samples.
     // (tests pass `entropy` to get the same match twice)
     // (`fixedSeed`: nothing from the clock, so a build can be scored against another on the same matches)
-    let s = ((hello.seed ?? 1) ^ ((hello.entropy ?? (TUNING.fixedSeed ? 0x1d47f9c2 : Date.now())) & 0x7fffffff) ^ ((hello.slot ?? 0) * 7919)) >>> 0
+    let s = ((hello.seed ?? 1) ^ ((hello.entropy ?? (TUNING.fixedSeed ? 0x74b0e5d8 : Date.now())) & 0x7fffffff) ^ ((hello.slot ?? 0) * 7919)) >>> 0
     this.rnd = () => {
       s = (s + 0x6d2b79f5) >>> 0
       let x = Math.imul(s ^ (s >>> 15), 1 | s)
@@ -708,6 +711,15 @@ export class Brain {
     // while two stand in it, and at that distance every shot of theirs lands)
     const dropCrowded = this.far() && !!drop && threats.some((e) => hyp(e.x - drop.x, e.y - drop.y) < drop.r + 10)
     this.ring = drop && drop.inRing && drop.lands <= 1 && !dropCrowded ? { x: drop.x, y: drop.y, r: drop.r } : null
+    // four seconds alone in the ring is all it takes: after nine without the repair something we
+    // cannot see is spoiling it, and a ring is a poor place to stand and be shot at
+    if (!this.ring) this.ringT = -1
+    else if (this.ringT < 0) this.ringT = t
+    else if (TUNING.dropFight && drop && t - this.ringT > 9) {
+      this.dropSkip.set(drop.id, t + 25)
+      this.ring = null
+      this.ringT = -1
+    }
     const still: Move = { x: 0, y: 0, boost: false, jump: false }
 
     let mv: Move = still
@@ -781,6 +793,14 @@ export class Brain {
         repair = true
         for (const e of threats) if (hyp(e.x - drop.x, e.y - drop.y) < drop.d * 0.75 + 45) repair = false
         if (hyp(primary.x - drop.x, primary.y - drop.y) < drop.d * 0.75 + 45) repair = false
+      }
+      // Against the squad, in the mid-range fight: a drop is a full repair, full energy and three
+      // cubes, at 95 s and at 165 s, which is when the stronger hunters are on us. Walk to it with
+      // the torso still firing, timed to arrive as it lands: from far off when hurt, from near by
+      // for the cubes alone.
+      if (!repair && TUNING.dropFight && this.pro() && drop && !this.ring) {
+        const maxD = hpFrac < 0.55 ? 200 : hpFrac < 0.8 ? 110 : 0
+        if (drop.d < maxD && drop.lands < drop.d / 11 + 2) repair = true
       }
       if (repair && drop) {
         // a landed drop close by repairs us fully in 4 s: better than any amount of hiding
@@ -1444,12 +1464,12 @@ export class Brain {
   }
 
   /** The supply drop worth walking to now, if any: 3 cubes and a full repair for 4 s alone in its ring. */
-  private dropPlan(zone: any, hpFrac: number): { x: number; y: number; r: number; lands: number; d: number; inRing: boolean; crowd: number } | null {
+  private dropPlan(zone: any, hpFrac: number): { id: number; x: number; y: number; r: number; lands: number; d: number; inRing: boolean; crowd: number } | null {
     // Against house bots this is a switch we score separately. In a free-for-all a drop is where the
     // strongest bots go (the best team on the feed took 5 in 2 matches), so only an unattended one.
     if (!TUNING.drops && !this.ffa) return null
     const [mx, my] = this.me.pos as number[]
-    let best: { x: number; y: number; r: number; lands: number; d: number; inRing: boolean; crowd: number } | null = null
+    let best: { id: number; x: number; y: number; r: number; lands: number; d: number; inRing: boolean; crowd: number } | null = null
     for (const dr of this.obs.drops ?? []) {
       const x = dr.pos[0]
       const y = dr.pos[1]
@@ -1457,16 +1477,21 @@ export class Brain {
       const lands = dr.lands_in ?? 0
       const r = dr.radius ?? this.cfg.drops?.radius ?? 8
       if (d > 320 || d / 9 > lands + 20) continue // too far: someone else will have it first
+      if ((this.dropSkip.get(dr.id) ?? -1) > this.t) continue
       if (!this.zoneOk(zone, x, y) || this.nav.snap(x, y, 3) < 0) continue
       let crowd = 0
-      for (const tr of this.tracks.values()) if (!tr.npc && !tr.ghost && this.t - tr.t < 6 && hyp(tr.x - x, tr.y - y) < 60) crowd++
-      if (crowd >= 2 || (crowd === 1 && hpFrac < 0.5 && d > r)) continue
+      // (Taking drops in mid-fight against the squad: the hunters that follow us stand 40-80 m off,
+      // which is not in the ring. Only one of them in or beside the ring itself spoils it.)
+      const tight = TUNING.dropFight && this.pro()
+      const cr = tight ? (d <= r + 20 ? r + 6 : 28) : 60
+      for (const tr of this.tracks.values()) if (!tr.npc && !tr.ghost && this.t - tr.t < 6 && hyp(tr.x - x, tr.y - y) < cr) crowd++
+      if (tight ? crowd >= 1 : crowd >= 2 || (crowd === 1 && hpFrac < 0.5 && d > r)) continue
       if (this.ffa) {
         let near = false
         for (const tr of this.tracks.values()) if (!tr.npc && this.t - tr.t < 20 && hyp(tr.x - x, tr.y - y) < 220) near = true
         if (near || this.nearFoes > 0) continue
       }
-      if (!best || d < best.d) best = { x, y, r, lands, d, inRing: d <= r - 1, crowd }
+      if (!best || d < best.d) best = { id: dr.id, x, y, r, lands, d, inRing: d <= r - 1, crowd }
     }
     return best
   }
@@ -1690,7 +1715,7 @@ export class Brain {
       const out = hyp(cx - zone.cx, cy - zone.cy) - (zone.cr - 8)
       if (out > 0) s -= 0.5 + out / 5
       if (w.clearance(cx, cy) < this.R + 1.5) s -= 0.5
-      if (ring && hyp(cx - ring.x, cy - ring.y) > ring.r - 1.5) s -= 5
+      if (ring && hyp(cx - ring.x, cy - ring.y) > ring.r - 1.5) s -= TUNING.dropFight && this.pro() ? 50 : 5
       if (s > bestS) {
         bestS = s
         bestI = i
