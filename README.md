@@ -47,6 +47,8 @@ The bot cannot see who its opponents are, so it works out which kind of match it
 
 **Opening (first 26 s, or until our first kill).** The kind of match is not known yet: collect a second weapon and cubes, fire at nobody who is not on us, and keep away from mechs that are close or facing us. Someone who fires at us, or walks at us with guns on us, is fought the long-range way at once.
 
+**Build 8 (2026-11-22; switches `plate`, `duel`, `search` in `TUNING`).** On build 7, which scored 5.16 against about 4.4 for everything before it. Three more blocks, scored together: plating and armour are taken ahead of self-repair upgrades, since a committed fight leaves no quiet seconds to mend in; with a laser in hand the bot no longer ducks from its own target's charging beam (it still ducks from anyone else's, and to reload); and with the second slot still empty after 20 s and no weapon known, it walks to the ground it has seen least of instead of to random points.
+
 **Build 7 (2026-11-22; switches `commit`, `noGlance`, `iso`, `fightLoot`, `ffaFrom` in `TUNING`).** On build 6's mid-range fight. Three probes that stop firing after one, two and four kills showed a first and a second kill in every practice match, so the opening is sound and what is missing is how we stand when several hunters come at once. Four blocks, scored together because one practice score cannot show a gain under about half a point:
 
 - Committed: the fight is not left to mend, to heal behind a wall or to wait in ambush, and there is no resting between fights. The step behind cover while both weapons reload stays, and so does ducking a charging laser.

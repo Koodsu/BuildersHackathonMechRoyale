@@ -28,6 +28,7 @@ const wrap = (a: number) => {
  * +12 to +17% on top (repair then starts after two quiet seconds at 115 HP/s, which hunters do
  * leave us), so a second one is taken ahead of everything (see pickUpgrade).
  */
+const UPGRADES_PLATED = ["laser_damage", "gun_mag", "plating", "armor", "gun_damage", "laser_charge", "gun_velocity", "gun_rate", "nanites", "servos"]
 const UPGRADES = [
   "laser_damage", "gun_mag", "nanites", "plating", "gun_damage", "laser_charge", "armor", "gun_velocity", "gun_rate", "servos",
   "lightning_efficiency", "capacitor", "reactor", "gyros", "jets",
@@ -128,7 +129,7 @@ export const PROBE = { survive: false, pacifist: false, noFfa: false, ceaseAt: 0
  * `ffaFrom` (clock time, 0 = off): practice ends at the cutoff, so a match played after it is the
  * free-for-all and is played survive-only from the first tick.
  */
-export const TUNING = { drops: true, standoff: false, wary: 0, seek: true, brawl: false, pro: true, rush: 0, rushMend: 0, fixedSeed: true, mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true, mortar: true, dodgeBoost: true, farmR: 120, idleStay: true, commit: true, noGlance: true, iso: true, fightLoot: true, ffaFrom: Date.UTC(2026, 10, 22, 16, 30) }
+export const TUNING = { drops: true, standoff: false, wary: 0, seek: true, brawl: false, pro: true, rush: 0, rushMend: 0, fixedSeed: true, mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true, mortar: true, dodgeBoost: true, farmR: 120, idleStay: true, commit: true, noGlance: true, iso: true, fightLoot: true, plate: true, duel: true, search: true, ffaFrom: Date.UTC(2026, 10, 22, 16, 30) }
 
 interface Track {
   id: number
@@ -343,6 +344,9 @@ export class Brain {
   private zoneKey = ""
   private zFrom = { x: 0, y: 0, r: 1e9 }
   private explore: { x: number; y: number; until: number } | null = null
+  private searchPt: { x: number; y: number; until: number } | null = null
+  private beenAt: number[][] = []
+  private beenT = -99
   private cover: { x: number; y: number; until: number } | null = null
 
   constructor(hello: any) {
@@ -496,6 +500,10 @@ export class Brain {
 
     this.remember(obs)
     if (obs.offer?.choices?.length) act.pick = this.pickUpgrade(obs.offer.choices)
+    if (this.t - this.beenT >= 2 && this.me?.pos && this.beenAt.length < 400) {
+      this.beenT = this.t
+      this.beenAt.push([this.me.pos[0], this.me.pos[1]])
+    }
     const zone = (this.zoneNow = this.zoneInfo(obs))
 
     // --- who matters
@@ -1110,10 +1118,13 @@ export class Brain {
     let rank = 999
     const held: any[] = Array.isArray(this.me?.upgrades) ? this.me.upgrades : []
     const haveNanites = held.some((u) => u === "nanites" || u?.id === "nanites")
+    const plated = TUNING.plate && TUNING.commit && this.pro()
     for (let i = 0; i < choices.length; i++) {
       let r = UPGRADES.indexOf(choices[i]?.id)
       // the second nanites is worth more than anything else on the list
-      if (r >= 0 && choices[i]?.id === "nanites" && haveNanites) r = -1
+      if (r >= 0 && choices[i]?.id === "nanites" && haveNanites && !plated) r = -1
+      // committed fights leave no quiet seconds to mend in: plating and armour ahead of self-repair
+      if (plated && r >= 0) r = UPGRADES_PLATED.indexOf(choices[i]?.id)
       if (r >= -1 && UPGRADES.includes(choices[i]?.id) && r < rank) {
         rank = r
         best = i
@@ -1375,6 +1386,8 @@ export class Brain {
     for (const e of threats) {
       if (e.tr.chargeT < 0 || t - e.tr.t > 0.15 || t - e.tr.chargeT < 0.1) continue
       if (far && e.d > 110) continue
+      // beam against beam with our own target: keep firing, the duck costs our shot too
+      if (TUNING.duel && this.pro() && e === primary && this.laser >= 0) continue
       if (e.seesMe ? Math.abs(wrap(e.tr.aimYaw - (e.yaw + Math.PI))) < 0.3 : e === primary) return "laser"
     }
     if (weaponsDown && !PROBE.noDuck && !(far && primary.d > 110)) return "reload"
@@ -1873,6 +1886,33 @@ export class Brain {
     return g
   }
 
+  private searchGoal(zone: any): Goal | null {
+    const [mx, my] = this.me.pos as number[]
+    const t = this.t
+    const sp = this.searchPt
+    if (sp && t < sp.until && hyp(sp.x - mx, sp.y - my) > 8 && hyp(sp.x - zone.nx, sp.y - zone.ny) <= zone.inner + 5) return { x: sp.x, y: sp.y, stop: 4, boost: false, kind: "search" }
+    let best: { x: number; y: number } | null = null
+    let bs = -Infinity
+    for (let k = 0; k < 24; k++) {
+      const ang = this.rnd() * TAU
+      const r = Math.sqrt(this.rnd()) * Math.max(10, zone.inner)
+      const x = zone.nx + Math.cos(ang) * r
+      const y = zone.ny + Math.sin(ang) * r
+      const d = hyp(x - mx, y - my)
+      if (d < 25 || d > 200 || !this.nav.free(x, y, 1) || !this.nav.inMain(x, y) || this.barred(x, y)) continue
+      let near = 120
+      for (const v of this.beenAt) near = Math.min(near, hyp(x - v[0], y - v[1]))
+      const s = near - d * 0.35
+      if (s > bs) {
+        bs = s
+        best = { x, y }
+      }
+    }
+    if (!best) return null
+    this.searchPt = { x: best.x, y: best.y, until: t + 25 }
+    return { x: best.x, y: best.y, stop: 4, boost: false, kind: "search" }
+  }
+
   private pickGoal(zone: any, hpFrac: number): Goal {
     const me = this.me
     const [mx, my, mz] = me.pos as number[]
@@ -1916,6 +1956,12 @@ export class Brain {
         }
       }
       if (best) return { x: best.x, y: best.y, stop: 0.5, boost: false, kind: "cube" }
+    }
+    // 2b. Weapon search: second slot still empty and no pickup known after 20 s. Walk to the ground
+    // we have seen least of (far from everywhere we have been), not to random points.
+    if (TUNING.search && this.pro() && empty && t > 20 && hyp(mx - zone.nx, my - zone.ny) <= zone.inner + 5) {
+      const sg = this.searchGoal(zone)
+      if (sg) return sg
     }
     // 3. Against house bots the clock is theirs (the whole squad comes late on, grown): with nobody
     // in sight, healthy and armed, go to where one was last seen rather than wait for it. A kill is a
