@@ -129,7 +129,7 @@ export const PROBE = { survive: false, pacifist: false, noFfa: false, ceaseAt: 0
  * `ffaFrom` (clock time, 0 = off): practice ends at the cutoff, so a match played after it is the
  * free-for-all and is played survive-only from the first tick.
  */
-export const TUNING = { drops: true, standoff: false, wary: 0, seek: true, brawl: false, pro: true, rush: 0, rushMend: 0, fixedSeed: true, mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true, mortar: true, dodgeBoost: true, farmR: 120, idleStay: true, commit: true, noGlance: true, iso: true, fightLoot: true, plate: true, duel: true, search: true, focus: true, dropPro: true, ring4: true, ffaFrom: Date.UTC(2026, 10, 22, 16, 30) }
+export const TUNING = { drops: true, standoff: false, wary: 0, seek: true, brawl: false, pro: true, rush: 0, rushMend: 0, fixedSeed: true, mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true, mortar: true, dodgeBoost: true, farmR: 120, idleStay: true, commit: true, noGlance: true, iso: true, fightLoot: true, plate: true, duel: true, search: true, ffaFrom: Date.UTC(2026, 10, 22, 16, 30) }
 
 interface Track {
   id: number
@@ -356,7 +356,7 @@ export class Brain {
     // Mixed with the clock on purpose: two runs of the same build are then two different samples.
     // (tests pass `entropy` to get the same match twice)
     // (`fixedSeed`: nothing from the clock, so a build can be scored against another on the same matches)
-    let s = ((hello.seed ?? 1) ^ ((hello.entropy ?? (TUNING.fixedSeed ? 0x1d94c2e5 : Date.now())) & 0x7fffffff) ^ ((hello.slot ?? 0) * 7919)) >>> 0
+    let s = ((hello.seed ?? 1) ^ ((hello.entropy ?? (TUNING.fixedSeed ? 0x43a7e9b1 : Date.now())) & 0x7fffffff) ^ ((hello.slot ?? 0) * 7919)) >>> 0
     this.rnd = () => {
       s = (s + 0x6d2b79f5) >>> 0
       let x = Math.imul(s ^ (s >>> 15), 1 | s)
@@ -521,12 +521,8 @@ export class Brain {
         const low = e.shootable && e.tr.hp < 0.35 * e.tr.maxHp
         s *= low ? 0.5 : clamp(e.d / STANDOFF, 0.5, 1.3)
       }
-      // (mid-range fight: the same. Fire spread over several of them is no points; a nearly dead one
-      // we can shoot comes first, and the one we are already on is kept)
-      const focus = TUNING.focus && this.pro()
-      if (focus && e.shootable && e.tr.hp < 0.35 * e.tr.maxHp) s *= 0.5
       if (e.attacked) s *= 0.7
-      if (e.tr.id === this.primaryId) s *= focus ? 0.6 : 0.8
+      if (e.tr.id === this.primaryId) s *= 0.8
       if (!e.shootable) s += 100
       if (e.tr.ghost) s += 200
       if (s < bestScore) {
@@ -638,7 +634,7 @@ export class Brain {
     // (45% of the time on the match feed) and a quarter of those get back above 60%: 45 HP/s returns
     // after 5 quiet seconds. A kill that walks off behind a building is not a kill, so a nearly dead
     // one is closed on and followed, while we are healthy and none of its friends is near.
-    this.finishing = (this.far() || this.pro()) && !!primary && !primary.tr.ghost && primary.tr.hp < 0.4 * primary.tr.maxHp && (TUNING.focus && this.pro() ? hpFrac >= 0.3 && !threats.some((e) => e !== primary && e.d < 60) : hpFrac >= 0.5 && !threats.some((e) => e !== primary && e.d < 110))
+    this.finishing = (this.far() || this.pro()) && !!primary && !primary.tr.ghost && primary.tr.hp < 0.4 * primary.tr.maxHp && hpFrac >= 0.5 && !threats.some((e) => e !== primary && e.d < 110)
     if (this.finishing) this.rangeNow = 85
     this.primaryId = primary ? primary.tr.id : -1
     // how long the enemy we are dealing with has been one we cannot see
@@ -683,8 +679,7 @@ export class Brain {
     // standing in a landed drop's ring: stay in it, the repair is worth more than any cover
     // (against house bots, not with one of them in the ring or about to be: the capture clock stops
     // while two stand in it, and at that distance every shot of theirs lands)
-    const dropMode = this.far() || (TUNING.dropPro && this.pro())
-    const dropCrowded = dropMode && !!drop && threats.some((e) => hyp(e.x - drop.x, e.y - drop.y) < drop.r + 10)
+    const dropCrowded = this.far() && !!drop && threats.some((e) => hyp(e.x - drop.x, e.y - drop.y) < drop.r + 10)
     this.ring = drop && drop.inRing && drop.lands <= 1 && !dropCrowded ? { x: drop.x, y: drop.y, r: drop.r } : null
     const still: Move = { x: 0, y: 0, boost: false, jump: false }
 
@@ -755,7 +750,7 @@ export class Brain {
       // 70%, 14 at 85%, and 3-4% more dealt before going down at 70% than at 50%.)
       // (house bots go for drops too, 15 of 21 in the recorded human games: not one with a mech we
       // know of anywhere near it)
-      if (!repair && TUNING.dropRun && dropMode && drop && !this.ring && !dropCrowded && drop.crowd === 0 && hpFrac < TUNING.dropAt && drop.d < 230 && drop.lands < drop.d / 12 + 2) {
+      if (!repair && TUNING.dropRun && this.far() && drop && !this.ring && !dropCrowded && drop.crowd === 0 && hpFrac < TUNING.dropAt && drop.d < 230 && drop.lands < drop.d / 12 + 2) {
         repair = true
         for (const e of threats) if (hyp(e.x - drop.x, e.y - drop.y) < drop.d * 0.75 + 45) repair = false
         if (hyp(primary.x - drop.x, primary.y - drop.y) < drop.d * 0.75 + 45) repair = false
@@ -1554,7 +1549,7 @@ export class Brain {
     const EP: boolean[] = []
     const EO: number[] = []
     const iso = TUNING.iso && mode === "fight" && this.pro()
-    const last = maxR >= 10 ? (iso ? (TUNING.ring4 ? 64 : 48) : 32) : 16
+    const last = maxR >= 10 ? (iso ? 48 : 32) : 16
     // every mech seen lately that could have a line on a spot, beyond the few we track as threats
     const extra: { x: number; y: number; mz: number }[] = []
     if (iso) {
@@ -1582,7 +1577,7 @@ export class Brain {
       let cy = my
       if (k >= 0) {
         const ang = (k % 16) * (TAU / 16) + phase
-        const r = k < 16 ? 5 : k < 32 ? 10 : k < 48 ? 16 : 24
+        const r = k < 16 ? 5 : k < 32 ? 10 : 16
         cx = mx + Math.cos(ang) * r
         cy = my + Math.sin(ang) * r
         if (onRoof ? !this.levelLine(mx, my, cx, cy) : !this.nav.lineWalkable(mx, my, cx, cy, 0.3)) continue
@@ -1647,7 +1642,7 @@ export class Brain {
         else s -= Math.max(0, Math.abs(dP - pref) - band) / 10
         // (sidestepping: against house bots sideways speed made no difference to how often they hit,
         // and it eats the speed we need to keep the range)
-        s += ((far && !this.mortarFoe ? 0.3 : 1.5) * Math.min(16, (cx - mx) * perpX + (cy - my) * perpY)) / 10
+        s += ((far && !this.mortarFoe ? 0.3 : 1.5) * ((cx - mx) * perpX + (cy - my) * perpY)) / 10
         if (far && !this.finishing) {
           // Room: a step toward the edge of the circle is worth less the nearer the edge is, and
           // close to it the way to keep a distance is round, not out. One way round, kept.
