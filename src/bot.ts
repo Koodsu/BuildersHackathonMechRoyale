@@ -80,7 +80,7 @@ const STANDOFF = 170
  *   `lightFirst` the lightning gun wanted ahead of the laser;
  *   `noDuck`     no leaving the fight for cover while our weapons reload.
  */
-export const PROBE = { survive: false, pacifist: false, noFfa: false, ceaseAt: 75, lightFirst: false, noDuck: false }
+export const PROBE = { survive: false, pacifist: false, noFfa: false, ceaseAt: 150, lightFirst: false, noDuck: false }
 export const TUNING = { drops: true, standoff: false, wary: 0, seek: true, brawl: false, pro: true, fixedSeed: true, mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true }
 
 interface Track {
