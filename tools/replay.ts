@@ -21,6 +21,7 @@ if (process.env.PROBE === "trig") PROBE.trigMul = Number(process.env.TRIG ?? 3)
 if (process.env.PROBE === "noGun") PROBE.noGun = true
 if (process.env.PROBE === "noLaser") PROBE.noLaser = true
 if (process.env.PROBE === "noLead") PROBE.noLead = true
+if (process.env.PROBE === "ceaseKills") PROBE.ceaseKills = Number(process.env.KILLS ?? 1)
 
 // switches, to check that the comparison builds do not crash either
 if (process.env.BRAWL) TUNING.brawl = true

@@ -106,8 +106,14 @@ const STANDOFF = 170
  * attacker) until our health is back to this share, or 45 s have gone. Probes U and V showed that
  * time costs little (no shot for 120 s lost no more than no shot for 60 s), so what ends the
  * kills is how hurt we are when the squad's better bots arrive, and the time to mend is there.
+ * `ceaseKills` (a count, 0 = off): no trigger pulled once we have made this many kills; everything
+ * else as the build plays. A practice score is our kills, so the score is then the average of
+ * min(kills, count): with 1 it is the share of matches in which we make a kill at all, with 2 that
+ * share plus the share with two or more, and so on. Three such scores tell a build that makes about
+ * four kills in every match from one that makes none in some and many in others, which one average
+ * cannot. (House bots that die without us, 0.15 a match with no shot fired, are counted on top.)
  */
-export const PROBE = { survive: false, pacifist: false, noFfa: false, ceaseAt: 0, lightFirst: false, noDuck: false, closeMul: 1, hunt: false, farm: false, trigMul: 1, noGun: false, noLaser: false, noLead: false, fireFrom: 0, reset: 0 }
+export const PROBE = { survive: false, pacifist: false, noFfa: false, ceaseAt: 0, lightFirst: false, noDuck: false, closeMul: 1, hunt: false, farm: false, trigMul: 1, noGun: false, noLaser: false, noLead: false, fireFrom: 0, reset: 0, ceaseKills: 1 }
 export const TUNING = { drops: true, standoff: false, wary: 0, seek: true, brawl: false, pro: true, rush: 25, rushMend: 0, fixedSeed: true, mend: 0.5, dropRun: true, dropAt: 0.7, look: "side" as "back" | "side" | "none", dodge: true, mortar: true, dodgeBoost: true, farmR: 120, idleStay: true }
 
 interface Track {
@@ -880,7 +886,7 @@ export class Brain {
       act.fire[this.laser] = false
       this.laserHold = false
     }
-    if (PROBE.pacifist || (PROBE.ceaseAt > 0 && t >= PROBE.ceaseAt) || (PROBE.fireFrom > 0 && t < PROBE.fireFrom)) {
+    if (PROBE.pacifist || (PROBE.ceaseAt > 0 && t >= PROBE.ceaseAt) || (PROBE.fireFrom > 0 && t < PROBE.fireFrom) || (PROBE.ceaseKills > 0 && this.killCount >= PROBE.ceaseKills)) {
       act.fire = [false, false]
       this.laserHold = false
     }
